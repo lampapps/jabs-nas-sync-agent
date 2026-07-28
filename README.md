@@ -3,8 +3,6 @@
 Nightly rsync job that mirrors directories between two NAS devices.  
 The script runs on a **client machine** that has both NAS devices mounted via NFS.
 
-Written by Claude Sonnet 4.6
-
 ---
 
 ## Topology
