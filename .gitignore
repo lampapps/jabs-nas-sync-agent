@@ -1,0 +1,28 @@
+# Local config — contains real mount paths, bandwidth limits, and the
+# JABS API key. Never committed; nas_sync.conf.example is the committed template.
+nas_sync.conf
+
+# Runtime state
+nas_sync.lock
+logs/*
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables (not currently used by this agent, but reserved)
+.env
+.env.local
+.env.*.local
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.AppleDouble
+.LSOverride

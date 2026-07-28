@@ -1,0 +1,85 @@
+# =============================================================================
+# nas_sync.conf.example — Template for nas_sync.conf
+# =============================================================================
+# Copy this file to nas_sync.conf and fill in your values.
+# nas_sync.conf is gitignored and will never be committed.
+# =============================================================================
+
+# ── NFS mount points on THIS client machine ───────────────────────────────
+NAS1_MOUNT="/mnt/nas1"
+NAS2_MOUNT="/mnt/nas2"
+
+# ── Bandwidth limits (KB/s) ───────────────────────────────────────────────
+# Set per direction based on the SENDER'S upload speed.
+# The bottleneck is always the uplink of whichever NAS is sending data.
+#   0 = unlimited
+#
+# Sizing guide:
+#   ~40 Mbps uplink  →  4600 KB/s (90% headroom)
+#   ~100 Mbps uplink → 11500 KB/s
+#   ~200 Mbps uplink → 23000 KB/s
+BWLIMIT_NAS1_TO_NAS2=4600
+BWLIMIT_NAS2_TO_NAS1=23000
+
+# ── Minimum free space on destination before syncing (bytes) ─────────────
+MIN_FREE_BYTES=$((10 * 1024 * 1024 * 1024))   # 10 GiB
+
+# ── Stop / deadline time ─────────────────────────────────────────────────
+# Hard wall-clock deadline (24-hour, local time).  When the script is still
+# running at this hour it stops gracefully: the current rsync is sent SIGTERM
+# so it exits cleanly, --partial keeps the incomplete file, and the next cron
+# run resumes exactly where this one left off.
+# Set to "" or leave unset to disable the deadline.
+STOP_HOUR=8
+
+# ── Log retention ─────────────────────────────────────────────────────────
+LOG_RETENTION_DAYS=30
+
+# ── Uptime Kuma telemetry ────────────────────────────────────────────
+# Create a Push monitor in Uptime Kuma, then paste its push URL below.
+# Sends up/down heartbeats so failures and missed runs trigger alerts.
+# Requires curl.  Set to "" to disable.
+UPTIME_KUMA_URL=""
+# UPTIME_KUMA_URL="https://<your-uptime-kuma>/api/push/<token>"
+
+# ── JABS agent monitoring ──────────────────────────────────────────────────
+# Reports each pair as a job to a JABS dashboard (see AGENT_API_GUIDE.md /
+# https://github.com/<org>/jabs). Requires python3. Set JABS_SERVER_URL="" to
+# disable — everything below is then ignored.
+#
+# IMPORTANT: register this agent on the JABS dashboard's Hosts page first —
+# there is no self-registration API. Registering returns a unique API key;
+# paste it into JABS_AGENT_KEY below. Each agent instance (even multiple on
+# the same machine) should get its own key.
+JABS_SERVER_URL="http://10.10.2.10:5001"
+
+# API key for this agent, generated when you register it on the dashboard.
+JABS_AGENT_KEY=""
+
+# Informational only (shown on the Hosts page; not used for authentication).
+JABS_HOSTNAME="$(hostname)"
+JABS_IP_ADDRESS=""
+# JABS_IP_ADDRESS="192.168.1.50"
+
+# Reported on the host record; bump when you change this script.
+JABS_AGENT_VERSION="0.1.0"
+
+# Per-request timeout (seconds) for calls to the JABS server.
+JABS_TIMEOUT=10
+
+# ── Sync pairs ────────────────────────────────────────────────────────────
+# Format: each element is "SOURCE_SUBDIR:DEST_SUBDIR"
+# Paths are relative to the respective NAS mount points.
+# Example: "documents:documents" means
+#          ${NAS1_MOUNT}/documents  →  ${NAS2_MOUNT}/documents
+
+# NAS1 → NAS2
+NAS1_TO_NAS2_PAIRS=(
+#   "backups:backups"
+#   "media/music:media/music"
+)
+
+# NAS2 → NAS1
+NAS2_TO_NAS1_PAIRS=(
+#   "documents:documents"
+)
