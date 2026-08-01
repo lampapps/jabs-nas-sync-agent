@@ -7,7 +7,7 @@ The script runs on a **client machine** that has both NAS devices mounted via NF
 
 ## Topology
 
-```
+```text
          ┌─────────────────────────────┐
          │       Tailscale network     │
          │                             │
@@ -28,7 +28,7 @@ The script runs on a **client machine** that has both NAS devices mounted via NF
 ## Files
 
 | File | Purpose |
-|------|---------|
+| --- | --- |
 | `nas_sync.sh` | Main sync script |
 | `nas_sync.conf` | Your local config — **gitignored, never committed** |
 | `nas_sync.conf.example` | Safe config template committed to the repo |
@@ -61,7 +61,7 @@ continuing.
 Add entries to `/etc/fstab` on the client so both NAS devices mount at boot.
 Replace IP addresses with Tailscale addresses (100.x.x.x) for the remote NAS.
 
-```
+```text
 # /etc/fstab — example entries
 nas1-lan.local:/export/data   /mnt/nas1  nfs  defaults,_netdev,nofail,soft,timeo=30  0 0
 100.x.x.x:/export/data        /mnt/nas2  nfs  defaults,_netdev,nofail,soft,timeo=60  0 0
@@ -88,7 +88,7 @@ cp nas_sync.conf.example nas_sync.conf
 Then edit `nas_sync.conf` and set your values:
 
 | Variable | Description |
-|---|---|
+| --- | --- |
 | `NAS1_MOUNT` | Local mount point for NAS1 |
 | `NAS2_MOUNT` | Local mount point for NAS2 |
 | `BWLIMIT_NAS1_TO_NAS2` | rsync bandwidth cap **NAS1→NAS2** in **KB/s** (limit by NAS1 upload speed) |
@@ -106,7 +106,7 @@ Then edit `nas_sync.conf` and set your values:
 #### Bandwidth sizing guide
 
 | `BWLIMIT_*` value | Approx throughput |
-|---|---|
+| --- | --- |
 | `5120` | ~5 MB/s / ~40 Mbps |
 | `10240` | ~10 MB/s / ~80 Mbps |
 | `25600` | ~25 MB/s / ~200 Mbps |
@@ -147,14 +147,14 @@ Add a line like this.  The example below starts the sync at 23:00 and relies on
 `STOP_HOUR=8` in `nas_sync.conf` to stop it by 08:00 — even if it hasn't
 finished.  The next nightly run will resume automatically:
 
-```
+```text
 # Run NAS sync nightly at 23:00; STOP_HOUR=8 in nas_sync.conf stops it by 08:00
 0 23 * * * /path/to/nas_rsync/nas_sync.sh
 ```
 
 If you don't need a hard stop, a simpler daytime/off-peak schedule also works:
 
-```
+```text
 # Run once daily at 02:30 AM with no deadline
 30 2 * * * /path/to/nas_rsync/nas_sync.sh
 ```
@@ -193,7 +193,7 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
    warnings, not failures; exit code 124 (deadline timeout) is logged as a soft
    stop and does not increment `FAILED_PAIRS`; all other non-zero codes
    increment `FAILED_PAIRS`.
-8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30).
+8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30); if JABS reporting is enabled, also asks the dashboard to purge its own job records older than the same window (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
 9. **Uptime Kuma heartbeats** — sends a push heartbeat to an Uptime Kuma push monitor:
    - `up` — on clean finish, with pair summary (also used for deadline stops)
    - `down` — if any pair fails or a fatal error occurs, with the error message
@@ -208,7 +208,7 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
 
 Logs are written to the `logs/` subdirectory alongside the script:
 
-```
+```text
 logs/
 ├── nas_sync_20260224_023001.log   # per-run timestamped log
 ├── nas_sync_20260225_023002.log
@@ -234,13 +234,13 @@ Enable it in `nas_sync.conf`:
 ```bash
 JABS_SERVER_URL="http://jabs-server:5001"
 JABS_AGENT_KEY=""                # paste the key from the dashboard here
-JABS_HOSTNAME="$(hostname)"      # informational only, shown on the Hosts page
+JABS_HOSTNAME="$(hostname)"      # informational only, shown on the Agents page
 JABS_IP_ADDRESS="192.168.1.50"   # informational only
 JABS_AGENT_VERSION="1.0.0"
 JABS_TIMEOUT=10
 ```
 
-Before the first run, register this agent on the JABS dashboard's Hosts
+Before the first run, register this agent on the JABS dashboard's Agents
 page — the API has no self-registration. Registering generates a unique
 API key; paste it into `JABS_AGENT_KEY`. Every request is authenticated by
 that key alone (sent as the `X-API-Key` header) — `JABS_HOSTNAME`/
@@ -266,6 +266,15 @@ only ever one "set" per pair. Every run sends:
 A bare heartbeat (host online + agent version, no job) is also sent once at
 the very start of each run.
 
+**Retention purge:** if `LOG_RETENTION_DAYS` is set (and greater than `0`),
+each run also asks the dashboard to purge its own completed job records
+older than that many days, via `jabs_client.py purge-jobs` (`POST
+/api/monitoring/purge-old-jobs`) — mirroring the local log-file pruning
+described in [How it works](#how-it-works) so the dashboard doesn't
+accumulate job history indefinitely for this agent. This is a no-op if
+`LOG_RETENTION_DAYS` is unset/`0` or JABS reporting is disabled, and is
+skipped during `--dry-run`.
+
 Reporting is fire-and-forget and best-effort: it's skipped entirely during
 `--dry-run`, and any failure (server unreachable, bad response, `python3`
 missing) is logged as a warning but never fails the sync itself. Set
@@ -276,7 +285,7 @@ missing) is logged as a warning but never fails the sync itself. Set
 ## Troubleshooting
 
 | Symptom | Check |
-|---|---|
+| --- | --- |
 | "not mounted" error | `mountpoint /mnt/nas1` and `mount` — is the NFS share up? |
 | "not NFS" warning | `/proc/mounts`: the script warns but continues |
 | Stalled transfers | Increase `--timeout`; check Tailscale connectivity (`tailscale ping`) |
@@ -286,7 +295,7 @@ missing) is logged as a warning but never fails the sync itself. Set
 | Lock not released | `rm nas_sync.lock` if you are certain no run is active |
 | Run stops before finishing | Expected if `STOP_HOUR` is set — the next cron run resumes automatically via `--partial` |
 | `STOP_HOUR` not taking effect | Ensure the value is a plain integer (0–23) with no quotes; check the log for the "Deadline :" line |
-| JABS events not showing up | Confirm `python3` is installed; confirm `JABS_AGENT_KEY` is set and matches a key generated on the JABS dashboard's Hosts page (missing key -> `401`, invalid/disabled key -> `403`, logged as a `WARN`) |
+| JABS events not showing up | Confirm `python3` is installed; confirm `JABS_AGENT_KEY` is set and matches a key generated on the JABS dashboard's Agents page (missing key -> `401`, invalid/disabled key -> `403`, logged as a `WARN`) |
 
 ---
 
