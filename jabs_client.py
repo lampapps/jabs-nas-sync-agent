@@ -2,11 +2,12 @@
 """
 jabs_client.py — Minimal HTTP client for the JABS Agent Monitoring API.
 
-Implements the two endpoints described in the JABS project's
+Implements the endpoints described in the JABS project's
 AGENTS_API_GUIDE.md (repo root of the main jabs_dev project, not part of
 this standalone nas_sync_agent repo):
     POST /api/monitoring/events
     POST /api/monitoring/sync-job-sets
+    POST /api/monitoring/purge-old-jobs
 
 This exists so nas_sync.sh (a bash script) can report activity to a JABS
 dashboard without hand-rolling JSON in bash. It's intentionally dependency
@@ -37,6 +38,9 @@ Usage:
 
     jabs_client.py sync-sets --server-url URL --agent-key KEY --hostname H \\
         --ip-address IP --job-name NAME --active-ids ID [ID ...] [--timeout SEC]
+
+    jabs_client.py purge-jobs --server-url URL --agent-key KEY --hostname H \\
+        --ip-address IP --retention-days N [--job-name NAME] [--timeout SEC]
 
 Omit a --event-type and --backup-set-id on `event` to send a bare
 heartbeat (no backup job created/updated) — see AGENTS_API_GUIDE.md.
@@ -143,6 +147,19 @@ def cmd_sync_sets(args):
     _report(status, body)
 
 
+def cmd_purge_jobs(args):
+    payload = {
+        "hostname": args.hostname,
+        "ip_address": args.ip_address,
+        "retention_days": args.retention_days,
+    }
+    if args.job_name:
+        payload["job_name"] = args.job_name
+    url = args.server_url.rstrip("/") + "/api/monitoring/purge-old-jobs"
+    status, body = _post(url, payload, args.timeout, args.agent_key)
+    _report(status, body)
+
+
 def _str2bool(v):
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
@@ -187,6 +204,11 @@ def build_parser():
     ss.add_argument("--job-name", required=True)
     ss.add_argument("--active-ids", nargs="*", default=[])
     ss.set_defaults(func=cmd_sync_sets)
+
+    pj = sub.add_parser("purge-jobs", parents=[common], help="POST /api/monitoring/purge-old-jobs")
+    pj.add_argument("--retention-days", type=int, required=True)
+    pj.add_argument("--job-name", help="Restrict purge to a single job name (default: all of this host's jobs)")
+    pj.set_defaults(func=cmd_purge_jobs)
 
     return parser
 

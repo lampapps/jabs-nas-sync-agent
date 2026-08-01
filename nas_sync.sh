@@ -67,6 +67,179 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# COLOR OUTPUT / PRINT HELPERS
+# (kept consistent with dashboard/jabs-dashboard.sh and
+#  file_backup_agent/jabs-agent.sh — see AGENTS.md "Bash Launcher Scripts")
+# ─────────────────────────────────────────────────────────────────────────────
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+print_status()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_header()  { echo -e "${BLUE}[NAS Sync]${NC} $1"; }
+print_section() { echo -e "${CYAN}[SECTION]${NC} $1"; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIFECYCLE COMMANDS (setup|logs|reset|help)
+# nas_sync.sh has no background server, so start/stop/restart/status don't
+# apply here (see AGENTS.md) — the script's default (no subcommand) behavior
+# is to run the sync itself, same as always, so cron invocations and
+# --dry-run/--debug flags keep working unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+    print_section "NAS Sync Agent Setup"
+
+    local conf_file="${SCRIPT_DIR}/nas_sync.conf"
+    local conf_example="${SCRIPT_DIR}/nas_sync.conf.example"
+    if [[ -f "${conf_file}" ]]; then
+        print_status "Config already exists (skipped): ${conf_file}"
+    elif [[ -f "${conf_example}" ]]; then
+        cp "${conf_example}" "${conf_file}"
+        print_status "Created ${conf_file} from nas_sync.conf.example"
+    else
+        print_error "Missing template: ${conf_example}"
+        return 1
+    fi
+
+    local log_dir="${SCRIPT_DIR}/logs"
+    if [[ ! -d "${log_dir}" ]]; then
+        mkdir -p "${log_dir}"
+        print_status "Created log directory: ${log_dir}"
+    else
+        print_status "Log directory already exists (skipped): ${log_dir}"
+    fi
+
+    print_status "Checking required commands..."
+    local missing=()
+    for cmd in rsync flock mountpoint df stat bc tee curl readlink; do
+        command -v "${cmd}" &>/dev/null || missing+=("${cmd}")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        print_warning "Missing commands: ${missing[*]} (see the header of this script for install instructions)"
+    else
+        print_status "All required commands are available."
+    fi
+
+    print_status "Setup complete!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit: ${conf_file}"
+    echo "  2. (Optional) Configure JABS_SERVER_URL/JABS_AGENT_KEY in that file to report to a dashboard"
+    echo "  3. Test:   $0 --dry-run --debug"
+    echo "  4. Run:    $0"
+    echo "  5. Add a CRON job for nightly runs (see: $0 help)"
+}
+
+cmd_logs() {
+    local log_dir="${SCRIPT_DIR}/logs"
+    local latest
+    latest="$(ls -t "${log_dir}"/nas_sync_*.log 2>/dev/null | head -1 || true)"
+    if [[ -n "${latest}" ]]; then
+        print_status "Showing latest log (Press Ctrl+C to exit): ${latest}"
+        tail -f "${latest}"
+    else
+        print_error "No log files found in: ${log_dir}"
+        return 1
+    fi
+}
+
+cmd_reset() {
+    print_section "NAS Sync Agent Reset"
+
+    print_status "Clearing logs..."
+    local log_dir="${SCRIPT_DIR}/logs"
+    if [[ -d "${log_dir}" ]]; then
+        rm -f "${log_dir}"/*.log
+        print_status "Logs cleared"
+    else
+        print_status "No logs directory found (skipped)"
+    fi
+
+    print_status "Clearing lock file..."
+    local lock_file="${SCRIPT_DIR}/nas_sync.lock"
+    if [[ -f "${lock_file}" ]]; then
+        rm -f "${lock_file}"
+        print_status "Lock file cleared"
+    else
+        print_status "No lock file found (skipped)"
+    fi
+
+    print_status "Reset complete."
+}
+
+cmd_help() {
+    cat << EOF
+NAS Sync Agent Launcher
+
+USAGE:
+  $0 [--dry-run] [--debug]
+  $0 {setup|logs|reset|help}
+
+COMMANDS:
+  (no args)    - Run the bidirectional sync (default cron invocation)
+  --dry-run    - Simulate the sync without writing changes
+  --debug      - Verbose logging
+  setup        - Create nas_sync.conf from the example, create logs/, check deps
+  logs         - Follow the most recent run's log
+  reset        - Reset app (clear logs, lock file)
+  help         - Show this help message
+
+DIRECTORIES:
+  Script:      ${SCRIPT_DIR}
+  Config:      ${SCRIPT_DIR}/nas_sync.conf
+  Logs:        ${SCRIPT_DIR}/logs
+
+SETUP:
+  1. Run: $0 setup
+  2. Edit: ${SCRIPT_DIR}/nas_sync.conf
+  3. Test: $0 --dry-run --debug
+  4. Add CRON job: crontab -e
+     0 23 * * * ${SCRIPT_DIR}/nas_sync.sh
+
+EXAMPLES:
+  # Initial setup
+  $0 setup
+
+  # Dry run with verbose output
+  $0 --dry-run --debug
+
+  # Real run
+  $0
+
+  # Follow logs
+  $0 logs
+
+  # Reset app state
+  $0 reset
+
+EOF
+    echo "COPY/PASTE COMMANDS (this host):"
+    echo ""
+    echo "  Run sync manually:"
+    echo "    ${SCRIPT_DIR}/nas_sync.sh"
+    echo ""
+    echo "  Dry run (no changes written):"
+    echo "    ${SCRIPT_DIR}/nas_sync.sh --dry-run --debug"
+    echo ""
+    echo "  CRON entry (nightly at 23:00):"
+    echo "    0 23 * * * ${SCRIPT_DIR}/nas_sync.sh"
+    echo ""
+}
+
+case "${1:-}" in
+    setup) cmd_setup; exit $? ;;
+    logs)  cmd_logs;  exit $? ;;
+    reset) cmd_reset; exit $? ;;
+    help|-h|--help) cmd_help; exit 0 ;;
+esac
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,6 +249,7 @@ CONF_FILE="${SCRIPT_DIR}/nas_sync.conf"
 if [[ ! -f "${CONF_FILE}" ]]; then
     echo "ERROR: ${CONF_FILE} not found." >&2
     echo "       Copy nas_sync.conf.example to nas_sync.conf and edit it." >&2
+    echo "       Or run: $0 setup" >&2
     exit 1
 fi
 # shellcheck source=nas_sync.conf.example
@@ -273,10 +447,61 @@ jabs_event() {
     return 0
 }
 
+# jabs_purge_old_jobs  →  asks the dashboard to purge completed job records
+# older than LOG_RETENTION_DAYS. Unlike file_backup_agent (which reconciles
+# discrete rotated sets via sync-job-sets), each nas_sync pair is an ongoing
+# mirror with no discrete sets to reconcile, so a time-based purge is used
+# instead. No-op if JABS reporting or LOG_RETENTION_DAYS is unset/disabled.
+jabs_purge_old_jobs() {
+    jabs_enabled || return 0
+    [[ -z "${LOG_RETENTION_DAYS:-}" || "${LOG_RETENTION_DAYS}" -le 0 ]] && return 0
+    if ${DRY_RUN:-false}; then
+        debug "JABS (dry-run, not sent): purge-jobs --retention-days ${LOG_RETENTION_DAYS}"
+        return 0
+    fi
+
+    local output
+    if ! output="$(python3 "${JABS_CLIENT}" purge-jobs \
+            --server-url "${JABS_SERVER_URL}" \
+            --agent-key "${JABS_AGENT_KEY}" \
+            --hostname "${JABS_HOSTNAME}" \
+            --ip-address "${JABS_IP_ADDRESS}" \
+            --retention-days "${LOG_RETENTION_DAYS}" \
+            --timeout "${JABS_TIMEOUT}" 2>&1)"; then
+        warn "JABS purge-old-jobs failed to send: ${output}"
+        return 0
+    fi
+    [[ -n "${output}" ]] && debug "JABS: ${output}"
+    return 0
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PREFLIGHT CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
+
+# parse_rsync_bytes <stats-line>  →  prints the raw byte count as an integer.
+# RSYNC_BASE_OPTS enables --human-readable, so rsync's --stats lines report
+# sizes like "Total transferred file size: 5.24M bytes" instead of a plain
+# integer. This converts that back to bytes (K/M/G/T are all 1024-based,
+# matching rsync's --human-readable formatting). Falls back to "0" if the
+# line is missing or unparsable.
+parse_rsync_bytes() {
+    local line="$1"
+    line="${line//,/}"
+    local num
+    num="$(grep -oE '[0-9]+(\.[0-9]+)?[KMGT]?' <<< "${line}" | head -1)"
+    [[ -z "${num}" ]] && { echo 0; return; }
+    local suffix="${num: -1}"
+    local mult=1
+    case "${suffix}" in
+        K) mult=1024;             num="${num%K}" ;;
+        M) mult=$((1024**2));     num="${num%M}" ;;
+        G) mult=$((1024**3));     num="${num%G}" ;;
+        T) mult=$((1024**4));     num="${num%T}" ;;
+    esac
+    echo "scale=0; (${num}*${mult})/1" | bc
+}
 
 check_dependencies() {
     local missing=()
@@ -398,6 +623,12 @@ sync_pair() {
     local run_id=""
     jabs_enabled && run_id="$(generate_uuid)"
 
+    # backup_set_name is a display label for this run, matching the other
+    # agents' "YYYYMMDD_HHMMSS" convention (job_name/backup_set_id stay the
+    # stable per-pair label, since this is an ongoing mirror, not a dated set).
+    local run_set_name
+    run_set_name="$(date +%Y%m%d_%H%M%S)"
+
     jabs_event \
         --event-type "heartbeat" \
         --message "Starting sync: ${label}" \
@@ -406,7 +637,7 @@ sync_pair() {
         --job-name "${label}" \
         --backup-type "sync" \
         --backup-set-id "${label}" \
-        --backup-set-name "${label}" \
+        --backup-set-name "${run_set_name}" \
         --source "${src}" \
         --destination "${dst}" \
         --sync true
@@ -472,9 +703,15 @@ sync_pair() {
 
     # Pull file/byte counts out of the --stats block for JABS reporting.
     # Falls back to 0 if a line is missing (e.g. rsync version differences).
+    # NOTE: RSYNC_BASE_OPTS includes --human-readable, so rsync prints sizes
+    # like "5.24M bytes" instead of a raw byte count. parse_rsync_bytes()
+    # below converts that back to a real byte count; without it this used to
+    # silently truncate to just the leading digit(s) (e.g. "5"), which could
+    # end up looking identical to (or nowhere near) the files-transferred
+    # count.
     local files_transferred bytes_transferred
     files_transferred="$(grep -m1 'Number of regular files transferred:' "${stats_file}" 2>/dev/null | grep -oE '[0-9,]+' | tr -d ',')"
-    bytes_transferred="$(grep -m1 'Total transferred file size:' "${stats_file}" 2>/dev/null | grep -oE '[0-9,]+' | head -1 | tr -d ',')"
+    bytes_transferred="$(parse_rsync_bytes "$(grep -m1 'Total transferred file size:' "${stats_file}" 2>/dev/null)")"
     rm -f "${stats_file}"
     : "${files_transferred:=0}"
     : "${bytes_transferred:=0}"
@@ -486,7 +723,7 @@ sync_pair() {
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete" --stage "Completed" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --backup-set-name "${run_set_name}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -500,7 +737,7 @@ sync_pair() {
                 --message "Sync complete with warnings (rsync exit ${exit_code}, some files skipped)" \
                 --stage "Completed (partial)" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --backup-set-name "${run_set_name}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -535,7 +772,7 @@ sync_pair() {
             jabs_event --event-type "error" --status "failed" \
                 --message "Sync failed: ${label}" --stage "Error" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --backup-set-name "${run_set_name}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --error-code "${exit_code}" \
                 --error-message "rsync exit code ${exit_code}"
@@ -701,6 +938,11 @@ main() {
 
     # ── Log rotation ────────────────────────────────────────────────────────
     rotate_logs
+
+    # ── JABS retention purge ─────────────────────────────────────────────────
+    # Mirrors the local LOG_RETENTION_DAYS-based log rotation above by asking
+    # the dashboard to purge its own job records older than the same window.
+    jabs_purge_old_jobs
 
     # ── Uptime Kuma final ping ───────────────────────────────────────────────
     local final_status="OK"

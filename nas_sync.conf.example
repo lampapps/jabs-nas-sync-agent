@@ -64,7 +64,7 @@ JABS_IP_ADDRESS=""
 # Reported on the host record; bump when you change this script.
 JABS_AGENT_VERSION="0.1.0"
 
-# Per-request timeout (seconds) for calls to the JABS server.
+# Per-request timeout (seconds) for calls to the JABS dashboard.
 JABS_TIMEOUT=10
 
 # ── Sync pairs ────────────────────────────────────────────────────────────
