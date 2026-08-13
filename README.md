@@ -1,25 +1,14 @@
 # nas_sync — Bidirectional NAS Sync over NFS / Tailscale
 
 Nightly rsync job that mirrors directories between two NAS devices.  
-The script runs on a **client machine** that has both NAS devices mounted via NFS.
+The script runs on a **client machine** that has both NAS devices mounted as drives. This was designed to work using NFS mounts over Tailscale but may work with any two mounts available to the client running the script.
 
 ---
 
 ## Topology
 
-```text
-         ┌─────────────────────────────┐
-         │       Tailscale network     │
-         │                             │
-  LAN ◄──┤  Client (runs nas_sync.sh)  │
-  NFS    │  - NAS1 mounted at /mnt/nas1│◄── NFS (LAN, fast)
-         │  - NAS2 mounted at /mnt/nas2│◄── NFS (over Tailscale, WAN)
-         │                             │
-         └─────────────────────────────┘
-```
-
 - **NAS1** — same physical LAN as the client; NFS traffic stays local.  
-- **NAS2** — remote site; NFS traffic crosses the Tailscale tunnel between the
+- **NAS2** — same physical LAN or at remote site; NFS traffic crosses the Tailscale tunnel between the
   two ISP uplinks.  The `BWLIMIT_NAS1_TO_NAS2` / `BWLIMIT_NAS2_TO_NAS1` settings
   cap rsync's throughput per direction to protect both ISP connections.
 
@@ -53,31 +42,9 @@ sudo apt install rsync util-linux bc curl
 sudo dnf install rsync util-linux bc curl
 ```
 
-Ensure both NAS devices are reachable over Tailscale and NFS-exported before
-continuing.
-
 ### 2. Configure NFS mounts
 
-Add entries to `/etc/fstab` on the client so both NAS devices mount at boot.
-Replace IP addresses with Tailscale addresses (100.x.x.x) for the remote NAS.
-
-```text
-# /etc/fstab — example entries
-nas1-lan.local:/export/data   /mnt/nas1  nfs  defaults,_netdev,nofail,soft,timeo=30  0 0
-100.x.x.x:/export/data        /mnt/nas2  nfs  defaults,_netdev,nofail,soft,timeo=60  0 0
-```
-
-> **`nofail`** — allows the system to boot even if the NFS mount is temporarily
-> unavailable.  
-> **`soft,timeo=`** — NFS operations time out instead of hanging forever; the
-> script will detect and report the failure.
-
-Mount them now:
-
-```bash
-sudo mount /mnt/nas1
-sudo mount /mnt/nas2
-```
+Ensure both NAS devices are reachable from the client running the script as mounted devices.
 
 ### 3. Create `nas_sync.conf`
 
@@ -174,7 +141,7 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
 1. **Dependency check** — verifies `rsync`, `flock`, `df`, `mountpoint` are available.
 2. **Lock** — acquires an exclusive `flock` on `nas_sync.lock` (alongside the
    script) so concurrent cron overlaps are prevented.
-3. **Mount verification** — confirms each NFS mount is alive with `mountpoint -q`
+3. **Mount verification** — confirms each mount is alive with `mountpoint -q`
    and a `stat` call; aborts early on stale/missing mounts.
 4. **Free space check** — skips a sync direction if the destination has less than
    `MIN_FREE_BYTES` free.
@@ -240,8 +207,8 @@ JABS_AGENT_VERSION="1.0.0"
 JABS_TIMEOUT=10
 ```
 
-Before the first run, register this agent on the JABS dashboard's Agents
-page — the API has no self-registration. Registering generates a unique
+Before the first run, you must register this agent on the JABS dashboard's Agents
+page. Registering generates a unique
 API key; paste it into `JABS_AGENT_KEY`. Every request is authenticated by
 that key alone (sent as the `X-API-Key` header) — `JABS_HOSTNAME`/
 `JABS_IP_ADDRESS` are stored for display only and don't need to match

@@ -437,7 +437,7 @@ jabs_event() {
             --hostname "${JABS_HOSTNAME}" \
             --ip-address "${JABS_IP_ADDRESS}" \
             --version "${JABS_AGENT_VERSION}" \
-            --agent-type "nas_sync" \
+            --agent-type "NAS Sync" \
             --timeout "${JABS_TIMEOUT}" \
             "$@" 2>&1)"; then
         warn "JABS event failed to send: ${output}"
@@ -623,12 +623,11 @@ sync_pair() {
     local run_id=""
     jabs_enabled && run_id="$(generate_uuid)"
 
-    # backup_set_name is a display label for this run, matching the other
-    # agents' "YYYYMMDD_HHMMSS" convention (job_name/backup_set_id stay the
-    # stable per-pair label, since this is an ongoing mirror, not a dated set).
-    local run_set_name
-    run_set_name="$(date +%Y%m%d_%H%M%S)"
-
+    # backup_set_name is a display label; for nas_sync_agent this is the
+    # same as the stable per-pair job_name/backup_set_id, since this is an
+    # ongoing mirror (not a dated set) — there is only ever one backup set
+    # per pair, and it should always group under that one label on the
+    # dashboard.
     jabs_event \
         --event-type "heartbeat" \
         --message "Starting sync: ${label}" \
@@ -637,7 +636,7 @@ sync_pair() {
         --job-name "${label}" \
         --backup-type "sync" \
         --backup-set-id "${label}" \
-        --backup-set-name "${run_set_name}" \
+        --backup-set-name "${label}" \
         --source "${src}" \
         --destination "${dst}" \
         --sync true
@@ -723,7 +722,7 @@ sync_pair() {
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete" --stage "Completed" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${run_set_name}" --backup-type "sync" \
+                --backup-set-name "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -737,7 +736,7 @@ sync_pair() {
                 --message "Sync complete with warnings (rsync exit ${exit_code}, some files skipped)" \
                 --stage "Completed (partial)" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${run_set_name}" --backup-type "sync" \
+                --backup-set-name "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -772,7 +771,7 @@ sync_pair() {
             jabs_event --event-type "error" --status "failed" \
                 --message "Sync failed: ${label}" --stage "Error" \
                 --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${run_set_name}" --backup-type "sync" \
+                --backup-set-name "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --error-code "${exit_code}" \
                 --error-message "rsync exit code ${exit_code}"
