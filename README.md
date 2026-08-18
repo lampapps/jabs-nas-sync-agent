@@ -24,9 +24,7 @@ The script runs on a **client machine** that has both NAS devices mounted as dri
 | `jabs_client.py` | Standalone HTTP client for the JABS Agent Monitoring API (see below); called by `nas_sync.sh`, requires `python3` |
 
 The JABS Agent Monitoring API itself (endpoints, auth, payload fields) is
-documented in `AGENTS_API_GUIDE.md` at the root of the main `jabs_dev`
-project — that file lives outside this repo since `nas_sync_agent` is
-versioned independently.
+documented in `AGENTS_API_GUIDE.md` in the jabs-dashboard repo.
 
 ---
 
@@ -66,9 +64,6 @@ Then edit `nas_sync.conf` and set your values:
 | `UPTIME_KUMA_URL` | Uptime Kuma push monitor URL (set to `""` to disable) |
 | `NAS1_TO_NAS2_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS1→NAS2** |
 | `NAS2_TO_NAS1_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS2→NAS1** |
-
-> `nas_sync.conf` is listed in `.gitignore` and will never be accidentally committed.
-> `nas_sync.conf.example` (no real values) is committed as a reference.
 
 #### Bandwidth sizing guide
 
@@ -110,20 +105,9 @@ Edit your crontab:
 crontab -e
 ```
 
-Add a line like this.  The example below starts the sync at 23:00 and relies on
-`STOP_HOUR=8` in `nas_sync.conf` to stop it by 08:00 — even if it hasn't
-finished.  The next nightly run will resume automatically:
-
 ```text
 # Run NAS sync nightly at 23:00; STOP_HOUR=8 in nas_sync.conf stops it by 08:00
 0 23 * * * /path/to/nas_rsync/nas_sync.sh
-```
-
-If you don't need a hard stop, a simpler daytime/off-peak schedule also works:
-
-```text
-# Run once daily at 02:30 AM with no deadline
-30 2 * * * /path/to/nas_rsync/nas_sync.sh
 ```
 
 Verify it was saved:
@@ -160,7 +144,7 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
    warnings, not failures; exit code 124 (deadline timeout) is logged as a soft
    stop and does not increment `FAILED_PAIRS`; all other non-zero codes
    increment `FAILED_PAIRS`.
-8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30); if JABS reporting is enabled, also asks the dashboard to purge its own job records older than the same window (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
+8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30). This is purely local; the dashboard purges its own job records on its own universal, dashboard-side retention schedule (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
 9. **Uptime Kuma heartbeats** — sends a push heartbeat to an Uptime Kuma push monitor:
    - `up` — on clean finish, with pair summary (also used for deadline stops)
    - `down` — if any pair fails or a fatal error occurs, with the error message
@@ -220,8 +204,7 @@ agent) can safely run on the same machine, each with its own key.
 (e.g. `NAS1:backups → NAS2:backups`). Unlike a versioned backup agent, a
 mirror sync doesn't produce rotating dated archives, so each pair uses one
 stable `backup_set_id` that's simply updated on every run rather than a new
-one per day — there's nothing to reconcile via `sync-job-sets`, since there's
-only ever one "set" per pair. Every run sends:
+one per day. Every run sends:
 
 - a start event when the pair begins,
 - a completion event (`backup_complete` or `error`) when it finishes, with
@@ -233,14 +216,11 @@ only ever one "set" per pair. Every run sends:
 A bare heartbeat (host online + agent version, no job) is also sent once at
 the very start of each run.
 
-**Retention purge:** if `LOG_RETENTION_DAYS` is set (and greater than `0`),
-each run also asks the dashboard to purge its own completed job records
-older than that many days, via `jabs_client.py purge-jobs` (`POST
-/api/monitoring/purge-old-jobs`) — mirroring the local log-file pruning
-described in [How it works](#how-it-works) so the dashboard doesn't
-accumulate job history indefinitely for this agent. This is a no-op if
-`LOG_RETENTION_DAYS` is unset/`0` or JABS reporting is disabled, and is
-skipped during `--dry-run`.
+**Retention:** this agent has no API to tell the dashboard when to purge its
+job records. The dashboard purges completed job records for **all** agents on
+its own universal, dashboard-side retention schedule `retention.max_days`,
+`LOG_RETENTION_DAYS` here only controls pruning of this script's own local
+log files.
 
 Reporting is fire-and-forget and best-effort: it's skipped entirely during
 `--dry-run`, and any failure (server unreachable, bad response, `python3`
@@ -269,7 +249,7 @@ missing) is logged as a warning but never fails the sync itself. Set
 ## Security notes
 
 - NFS traffic between the client and NAS2 (remote) travels **inside the
-  Tailscale WireGuard tunnel** — it is encrypted in transit.
+  Tailscale WireGuard tunnel** if used — it is encrypted in transit.
 - NFS traffic between the client and NAS1 (LAN) is unencrypted on the local
   network (normal NFS behaviour).
 - The script does **not** store credentials; authentication is handled by NFS

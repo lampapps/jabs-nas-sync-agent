@@ -401,9 +401,12 @@ uptime_kuma_ping() {
 # Design note: unlike a versioned backup agent, each configured pair here is
 # an ongoing *mirror* rather than a rotating set of dated archives. So each
 # pair gets exactly one stable backup_set_id (derived from its label) that
-# is reused/updated on every run, rather than a new dated set per run — there
-# is nothing to reconcile via /api/monitoring/sync-job-sets, since there's
-# only ever one "set" per pair.
+# is reused/updated on every run, rather than a new dated set per run.
+#
+# The dashboard purges its own job records on a universal, dashboard-side
+# retention schedule (see the dashboard's README.md Retention Purge section)
+# — this script has no API to tell the dashboard when to purge records, and
+# LOG_RETENTION_DAYS below only controls this script's own local log files.
 
 jabs_enabled() { [[ -n "${JABS_SERVER_URL}" ]]; }
 
@@ -441,34 +444,6 @@ jabs_event() {
             --timeout "${JABS_TIMEOUT}" \
             "$@" 2>&1)"; then
         warn "JABS event failed to send: ${output}"
-        return 0
-    fi
-    [[ -n "${output}" ]] && debug "JABS: ${output}"
-    return 0
-}
-
-# jabs_purge_old_jobs  →  asks the dashboard to purge completed job records
-# older than LOG_RETENTION_DAYS. Unlike file_backup_agent (which reconciles
-# discrete rotated sets via sync-job-sets), each nas_sync pair is an ongoing
-# mirror with no discrete sets to reconcile, so a time-based purge is used
-# instead. No-op if JABS reporting or LOG_RETENTION_DAYS is unset/disabled.
-jabs_purge_old_jobs() {
-    jabs_enabled || return 0
-    [[ -z "${LOG_RETENTION_DAYS:-}" || "${LOG_RETENTION_DAYS}" -le 0 ]] && return 0
-    if ${DRY_RUN:-false}; then
-        debug "JABS (dry-run, not sent): purge-jobs --retention-days ${LOG_RETENTION_DAYS}"
-        return 0
-    fi
-
-    local output
-    if ! output="$(python3 "${JABS_CLIENT}" purge-jobs \
-            --server-url "${JABS_SERVER_URL}" \
-            --agent-key "${JABS_AGENT_KEY}" \
-            --hostname "${JABS_HOSTNAME}" \
-            --ip-address "${JABS_IP_ADDRESS}" \
-            --retention-days "${LOG_RETENTION_DAYS}" \
-            --timeout "${JABS_TIMEOUT}" 2>&1)"; then
-        warn "JABS purge-old-jobs failed to send: ${output}"
         return 0
     fi
     [[ -n "${output}" ]] && debug "JABS: ${output}"
@@ -688,13 +663,20 @@ sync_pair() {
         fi
         debug "Deadline in ${_remaining}s — passing to timeout"
         timeout --kill-after=5 "${_remaining}" "${cmd[@]}" \
-            > >(tee "${stats_file}") \
+            > "${stats_file}" \
             2> >(while IFS= read -r _l; do warn "rsync: ${_l}"; done) || exit_code=$?
     else
         "${cmd[@]}" \
-            > >(tee "${stats_file}") \
+            > "${stats_file}" \
             2> >(while IFS= read -r _l; do warn "rsync: ${_l}"; done) || exit_code=$?
     fi
+
+    # rsync's --stats output is verbose; only the summary line is worth
+    # keeping in the log, and it needs our timestamp/level prefix like every
+    # other log line rather than being dumped raw.
+    local total_size_line
+    total_size_line="$(grep -m1 '^total size is' "${stats_file}" 2>/dev/null || true)"
+    [[ -n "${total_size_line}" ]] && info "${total_size_line}"
 
     local end_epoch
     end_epoch="$(date +%s)"
@@ -937,11 +919,6 @@ main() {
 
     # ── Log rotation ────────────────────────────────────────────────────────
     rotate_logs
-
-    # ── JABS retention purge ─────────────────────────────────────────────────
-    # Mirrors the local LOG_RETENTION_DAYS-based log rotation above by asking
-    # the dashboard to purge its own job records older than the same window.
-    jabs_purge_old_jobs
 
     # ── Uptime Kuma final ping ───────────────────────────────────────────────
     local final_status="OK"
