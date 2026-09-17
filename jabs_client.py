@@ -158,7 +158,7 @@ def build_parser():
     ev.add_argument("--destination")
     ev.add_argument("--encrypt", type=_str2bool)
     ev.add_argument("--sync", type=_str2bool)
-    ev.add_argument("--status", choices=["success", "failed"])
+    ev.add_argument("--status", choices=["success", "failed", "stopped"])
     ev.add_argument("--duration-seconds", type=float)
     ev.add_argument("--files-backed-up", type=int)
     ev.add_argument("--bytes-backed-up", type=int)

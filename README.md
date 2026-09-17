@@ -141,9 +141,10 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
    - `--timeout` (abandon stalled connections after 5 min)
    - `timeout <remaining_seconds>` wrapper (enforces `STOP_HOUR` deadline)
 7. **Result tracking** — exit codes 23/24 (partial transfer) are treated as
-   warnings, not failures; exit code 124 (deadline timeout) is logged as a soft
-   stop and does not increment `FAILED_PAIRS`; all other non-zero codes
-   increment `FAILED_PAIRS`.
+   warnings, not failures; exit code 124 (deadline timeout) and a stop before
+   a pair even starts are reported to JABS as a finalized `stopped` status
+   (not left "running") and do not increment `FAILED_PAIRS`; all other
+   non-zero codes increment `FAILED_PAIRS`.
 8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30). This is purely local; the dashboard purges its own job records on its own universal, dashboard-side retention schedule (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
 9. **Uptime Kuma heartbeats** — sends a push heartbeat to an Uptime Kuma push monitor:
    - `up` — on clean finish, with pair summary (also used for deadline stops)
@@ -210,8 +211,9 @@ one per day. Every run sends:
 - a completion event (`backup_complete` or `error`) when it finishes, with
   duration and file/byte counts pulled from rsync's `--stats` output,
 - or, if the pair is stopped by `STOP_HOUR` or a signal before finishing, a
-  plain progress event — the job is left "running" on the dashboard rather
-  than marked complete or failed, since it will resume on the next run.
+  `backup_complete` event with `status=stopped` — the job is finalized (not
+  left "running") but distinct from success/failure, since it will resume
+  on the next run.
 
 A bare heartbeat (host online + agent version, no job) is also sent once at
 the very start of each run.

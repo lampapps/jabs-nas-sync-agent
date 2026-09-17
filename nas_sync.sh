@@ -318,6 +318,15 @@ declare -a PAIR_RESULTS=()
 DEADLINE_EPOCH=0
 DEADLINE_REACHED=false
 
+# In-flight job tracking. Set by sync_pair() around each pair's rsync call,
+# cleared once that pair is finalized. Lets the EXIT trap report a pair as
+# "stopped" on the dashboard if the whole script is killed mid-sync (e.g. an
+# external deadline/timeout mechanism), not just this script's own STOP_HOUR
+# handling — otherwise that job would stay stuck at status='running' forever.
+CURRENT_RUN_ID=""
+CURRENT_JOB_LABEL=""
+CURRENT_JOB_START_EPOCH=0
+
 # Dry-run and debug flags
 DRY_RUN=false
 DEBUG=false
@@ -355,12 +364,28 @@ _COMPLETED=false
 # a complete/down ping was sent.
 _exit_trap() {
     local rc=$?
-    ${_COMPLETED:-false} && return   # normal shutdown — already pinged
-    ${DRY_RUN:-false}    && return   # test run — never pings Uptime Kuma
+    ${_COMPLETED:-false} && return   # normal shutdown — already pinged/reported
+    ${DRY_RUN:-false}    && return   # test run — never pings Uptime Kuma or JABS
     local msg="unexpected exit"
     [[ $rc -ne 0 ]] && msg="unexpected exit (code ${rc})"
     err "Script terminated unexpectedly — sending Uptime Kuma down ping"
     uptime_kuma_ping "down" "${msg}"
+
+    # If a pair was mid-sync when this process was killed (e.g. an external
+    # deadline/timeout mechanism, not this script's own STOP_HOUR handling),
+    # finalize its dashboard job as "stopped" instead of leaving it stuck at
+    # status='running' forever (stale spinner, and never picked up by the
+    # digest email since it never got a completed_at timestamp).
+    if [[ -n "${CURRENT_RUN_ID:-}" ]]; then
+        local duration=$(( $(date +%s) - ${CURRENT_JOB_START_EPOCH:-$(date +%s)} ))
+        jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
+            --message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)" \
+            --run-id "${CURRENT_RUN_ID}" --job-name "${CURRENT_JOB_LABEL}" \
+            --backup-set-id "${CURRENT_JOB_LABEL}" --backup-set-name "${CURRENT_JOB_LABEL}" \
+            --backup-type "sync" --duration-seconds "${duration}" \
+            --files-backed-up 0 --bytes-backed-up 0 \
+            --error-message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)"
+    fi
 }
 trap '_exit_trap' EXIT
 
@@ -598,6 +623,15 @@ sync_pair() {
     local run_id=""
     jabs_enabled && run_id="$(generate_uuid)"
 
+    # Track this pair as "in flight" so the EXIT trap can finalize it as
+    # "stopped" if the whole script gets killed before we reach one of the
+    # normal completion points below (cleared right before every return).
+    if jabs_enabled; then
+        CURRENT_RUN_ID="${run_id}"
+        CURRENT_JOB_LABEL="${label}"
+        CURRENT_JOB_START_EPOCH="$(date +%s)"
+    fi
+
     # backup_set_name is a display label; for nas_sync_agent this is the
     # same as the stable per-pair job_name/backup_set_id, since this is an
     # ongoing mirror (not a dated set) — there is only ever one backup set
@@ -656,9 +690,17 @@ sync_pair() {
             (( SKIPPED_PAIRS++ )) || true
             DEADLINE_REACHED=true
             rm -f "${stats_file}"
-            jabs_event --event-type "heartbeat" --stage "Stopped" \
+            local duration=$(( $(date +%s) - start_epoch ))
+            # Finalized as "stopped" (not left running) so the dashboard
+            # doesn't show a stale spinner; resumes fresh on the next run.
+            jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "Deadline reached before ${label} could start (resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}"
+                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
+                --backup-set-name "${label}" --backup-type "sync" \
+                --duration-seconds "${duration}" \
+                --files-backed-up 0 --bytes-backed-up 0 \
+                --error-message "Deadline reached before ${label} could start (resumes next run)"
+            CURRENT_RUN_ID=""
             return 0
         fi
         debug "Deadline in ${_remaining}s — passing to timeout"
@@ -730,11 +772,16 @@ sync_pair() {
             PAIR_RESULTS+=("STOP  ${label}  (interrupted — resumes next run)")
             (( SKIPPED_PAIRS++ )) || true
             DEADLINE_REACHED=true
-            # Not finalized as complete/error — the job stays "running" on the
-            # dashboard until a future run finishes it (a resumable pause).
-            jabs_event --event-type "heartbeat" --stage "Stopped" \
+            # Finalized as "stopped" (not left running) so the dashboard
+            # doesn't show a stale spinner; resumes fresh on the next run.
+            jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "${label} interrupted (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}"
+                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
+                --backup-set-name "${label}" --backup-type "sync" \
+                --duration-seconds "${duration}" \
+                --files-backed-up "${files_transferred}" \
+                --bytes-backed-up "${bytes_transferred}" \
+                --error-message "${label} interrupted (partial transfer saved; resumes next run)"
             ;;
         124)
             # timeout sent SIGTERM at the deadline; rsync saved the partial file
@@ -742,9 +789,16 @@ sync_pair() {
             PAIR_RESULTS+=("STOP  ${label}  (deadline — resumes next run)")
             (( SKIPPED_PAIRS++ )) || true
             DEADLINE_REACHED=true
-            jabs_event --event-type "heartbeat" --stage "Stopped" \
+            # Finalized as "stopped" (not left running) so the dashboard
+            # doesn't show a stale spinner; resumes fresh on the next run.
+            jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "${label} stopped at deadline (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}"
+                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
+                --backup-set-name "${label}" --backup-type "sync" \
+                --duration-seconds "${duration}" \
+                --files-backed-up "${files_transferred}" \
+                --bytes-backed-up "${bytes_transferred}" \
+                --error-message "${label} stopped at deadline (partial transfer saved; resumes next run)"
             ;;
         *)
             err "FAILED: ${label} — rsync exit code ${exit_code}"
@@ -757,9 +811,11 @@ sync_pair() {
                 --duration-seconds "${duration}" \
                 --error-code "${exit_code}" \
                 --error-message "rsync exit code ${exit_code}"
+            CURRENT_RUN_ID=""
             return 1
             ;;
     esac
+    CURRENT_RUN_ID=""
     return 0
 }
 
