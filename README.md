@@ -61,6 +61,7 @@ Then edit `nas_sync.conf` and set your values:
 | `MIN_FREE_BYTES` | Minimum free space required on destination before syncing |
 | `STOP_HOUR` | Hard stop hour in 24-hour local time (e.g. `8` = 08:00). rsync is sent SIGTERM at this time and `--partial` saves progress for the next run to resume. Set to `""` to disable. |
 | `LOG_RETENTION_DAYS` | How many days of logs to keep (default `30`) |
+| `VERIFY_AFTER_SYNC` | Run a low-cost quick verify after each sync (default `true`). See [Integrity checks](#integrity-checks) below. |
 | `UPTIME_KUMA_URL` | Uptime Kuma push monitor URL (set to `""` to disable) |
 | `NAS1_TO_NAS2_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS1→NAS2** |
 | `NAS2_TO_NAS1_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS2→NAS1** |
@@ -145,14 +146,43 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
    a pair even starts are reported to JABS as a finalized `stopped` status
    (not left "running") and do not increment `FAILED_PAIRS`; all other
    non-zero codes increment `FAILED_PAIRS`.
-8. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30). This is purely local; the dashboard purges its own job records on its own universal, dashboard-side retention schedule (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
-9. **Uptime Kuma heartbeats** — sends a push heartbeat to an Uptime Kuma push monitor:
+8. **Quick verify** — after a successful or partial sync, re-compares source
+   and destination by size/mtime only (see [Integrity checks](#integrity-checks)).
+9. **Log rotation** — deletes log files older than `LOG_RETENTION_DAYS` (default 30). This is purely local; the dashboard purges its own job records on its own universal, dashboard-side retention schedule (see [JABS agent monitoring](#jabs-agent-monitoring-optional)).
+10. **Uptime Kuma heartbeats** — sends a push heartbeat to an Uptime Kuma push monitor:
    - `up` — on clean finish, with pair summary (also used for deadline stops)
    - `down` — if any pair fails or a fatal error occurs, with the error message
    The exit trap sends a `down` heartbeat on unexpected termination (e.g. SIGKILL).
    Set `UPTIME_KUMA_URL=""` to disable.
-10. **Exit code** — exits non-zero if any pair failed, so cron monitoring tools
+11. **Exit code** — exits non-zero if any pair failed, so cron monitoring tools
     can also catch failures independently.
+
+---
+
+## Integrity checks
+
+Unlike a checksummed backup format, an rsync mirror has no built-in index to
+verify against — so `nas_sync.sh` verifies by re-comparing source and
+destination directly.
+
+**Automatic quick verify** (default on): after each pair finishes syncing
+(success or a partial-transfer warning), `nas_sync.sh` runs a second
+`rsync --dry-run --itemize-changes` pass comparing file **size and mtime
+only** — no file content is read, so this costs about the same as the sync's
+own scan. Any items still reported as different are logged as a warning and
+reported to JABS with stage `Verify (quick)`, but this never fails or
+reverts the already-completed sync. Disable with `VERIFY_AFTER_SYNC=false`
+in `nas_sync.conf`.
+
+**Manual deep check** (run by hand, not on a schedule): reads and compares
+actual file **content** via `rsync --dry-run --checksum --itemize-changes`.
+This is slow — every file on both sides is read in full — so it is never run
+automatically.
+
+```bash
+./nas_sync.sh check-deep                  # check every configured pair
+./nas_sync.sh check-deep --pair backups   # only pairs whose label contains "backups"
+```
 
 ---
 
@@ -186,25 +216,24 @@ Enable it in `nas_sync.conf`:
 ```bash
 JABS_SERVER_URL="http://jabs-server:5001"
 JABS_AGENT_KEY=""                # paste the key from the dashboard here
-JABS_HOSTNAME="$(hostname)"      # informational only, shown on the Agents page
-JABS_IP_ADDRESS="192.168.1.50"   # informational only
 JABS_AGENT_VERSION="1.0.0"
 JABS_TIMEOUT=10
 ```
 
 Before the first run, you must register this agent on the JABS dashboard's Agents
-page. Registering generates a unique
-API key; paste it into `JABS_AGENT_KEY`. Every request is authenticated by
-that key alone (sent as the `X-API-Key` header) — `JABS_HOSTNAME`/
-`JABS_IP_ADDRESS` are stored for display only and don't need to match
-anything. This also means multiple agents (e.g. this script plus a backup
-agent) can safely run on the same machine, each with its own key.
+page — that's also where you set this agent's hostname/IP for display (the
+dashboard ignores any hostname/IP an agent reports; it isn't used for auth
+or stored from event payloads). Registering generates a unique API key;
+paste it into `JABS_AGENT_KEY`. Every request is authenticated by that key
+alone (sent as the `X-API-Key` header). This also means multiple agents
+(e.g. this script plus a backup agent) can safely run on the same machine,
+each with its own key.
 
 **How pairs map to JABS jobs:** each configured `NAS1_TO_NAS2_PAIRS` /
 `NAS2_TO_NAS1_PAIRS` entry is reported as one job, identified by its label
 (e.g. `NAS1:backups → NAS2:backups`). Unlike a versioned backup agent, a
 mirror sync doesn't produce rotating dated archives, so each pair uses one
-stable `backup_set_id` that's simply updated on every run rather than a new
+stable `group_id` that's simply updated on every run rather than a new
 one per day. Every run sends:
 
 - a start event when the pair begins,
@@ -245,6 +274,7 @@ missing) is logged as a warning but never fails the sync itself. Set
 | Run stops before finishing | Expected if `STOP_HOUR` is set — the next cron run resumes automatically via `--partial` |
 | `STOP_HOUR` not taking effect | Ensure the value is a plain integer (0–23) with no quotes; check the log for the "Deadline :" line |
 | JABS events not showing up | Confirm `python3` is installed; confirm `JABS_AGENT_KEY` is set and matches a key generated on the JABS dashboard's Agents page (missing key -> `401`, invalid/disabled key -> `403`, logged as a `WARN`) |
+| "Verify (quick)" warnings | Some files still differ by size/mtime right after a sync; often transient (files still being written on the source) — re-run, or use `./nas_sync.sh check-deep --pair NAME` to confirm with actual content |
 
 ---
 

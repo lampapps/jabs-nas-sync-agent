@@ -22,7 +22,17 @@
 #   Dry run:        ./nas_sync.sh --dry-run
 #   Debug/verbose:  ./nas_sync.sh --debug
 #   Both:           ./nas_sync.sh --dry-run --debug
+#   Deep check:     ./nas_sync.sh check-deep [--pair NAME]
 #   Cron (nightly): see README.md
+#
+# INTEGRITY CHECKS
+#   After every successful (or partial) sync, sync_pair() runs a low-cost
+#   quick verify: an rsync --dry-run comparison against size/mtime only (no
+#   file content is read). Any remaining differences are logged and reported
+#   to JABS, but never fail the already-completed sync. Controlled by
+#   VERIFY_AFTER_SYNC in nas_sync.conf (default true).
+#   For a thorough (slow) check that reads and compares actual file content,
+#   run manually: ./nas_sync.sh check-deep [--pair NAME]
 #
 # REQUIREMENTS
 #   The following commands must be available on the CLIENT machine running
@@ -63,6 +73,10 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Reported to the JABS dashboard as this agent's version; bump when you
+# change this script.
+readonly SCRIPT_VERSION="0.2.2"
+
 # Resolve the directory this script lives in (works regardless of cwd)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
@@ -71,12 +85,14 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # (kept consistent with dashboard/jabs-dashboard.sh and
 #  file_backup_agent/jabs-agent.sh — see AGENTS.md "Bash Launcher Scripts")
 # ─────────────────────────────────────────────────────────────────────────────
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m' # No Color
 
 print_status()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
@@ -128,12 +144,12 @@ cmd_setup() {
 
     print_status "Setup complete!"
     echo ""
-    echo "Next steps:"
-    echo "  1. Edit: ${conf_file}"
+    echo -e "${BOLD}Next steps:${NC}"
+    echo -e "  1. Edit: ${CYAN}${conf_file}${NC}"
     echo "  2. (Optional) Configure JABS_SERVER_URL/JABS_AGENT_KEY in that file to report to a dashboard"
-    echo "  3. Test:   $0 --dry-run --debug"
-    echo "  4. Run:    $0"
-    echo "  5. Add a CRON job for nightly runs (see: $0 help)"
+    echo -e "  3. Test:   ${CYAN}$0 --dry-run --debug${NC}"
+    echo -e "  4. Run:    ${CYAN}$0${NC}"
+    echo -e "  5. Add a CRON job for nightly runs (see: ${CYAN}$0 help${NC})"
 }
 
 cmd_logs() {
@@ -175,60 +191,74 @@ cmd_reset() {
 
 cmd_help() {
     cat << EOF
-NAS Sync Agent Launcher
+${BOLD}NAS Sync Agent Launcher${NC}
 
-USAGE:
+${BOLD}USAGE:${NC}
   $0 [--dry-run] [--debug]
-  $0 {setup|logs|reset|help}
+  $0 {setup|logs|reset|check-deep|help}
 
-COMMANDS:
-  (no args)    - Run the bidirectional sync (default cron invocation)
-  --dry-run    - Simulate the sync without writing changes
-  --debug      - Verbose logging
-  setup        - Create nas_sync.conf from the example, create logs/, check deps
-  logs         - Follow the most recent run's log
-  reset        - Reset app (clear logs, lock file)
-  help         - Show this help message
+${BOLD}COMMANDS:${NC}
+  ${DIM}(no args)${NC}   Run the bidirectional sync (default cron invocation)
+  ${YELLOW}--dry-run${NC}   Simulate the sync without writing changes
+  ${YELLOW}--debug${NC}     Verbose logging
+  ${CYAN}setup${NC}       Create nas_sync.conf from the example, create logs/, check deps
+  ${CYAN}logs${NC}        Follow the most recent run's log
+  ${CYAN}reset${NC}       Reset app (clear logs, lock file)
+  ${CYAN}check-deep${NC}  Manually verify pairs by comparing file content (slow, reads all data); add --pair NAME to check one pair only
+  ${CYAN}help${NC}        Show this help message
 
-DIRECTORIES:
+${BOLD}DIRECTORIES:${NC}
   Script:      ${SCRIPT_DIR}
   Config:      ${SCRIPT_DIR}/nas_sync.conf
   Logs:        ${SCRIPT_DIR}/logs
 
-SETUP:
-  1. Run: $0 setup
+${BOLD}SETUP:${NC}
+  1. Run: ${CYAN}$0 setup${NC}
   2. Edit: ${SCRIPT_DIR}/nas_sync.conf
-  3. Test: $0 --dry-run --debug
+  3. Test: ${CYAN}$0 --dry-run --debug${NC}
   4. Add CRON job: crontab -e
-     0 23 * * * ${SCRIPT_DIR}/nas_sync.sh
+     ${DIM}0 23 * * * ${SCRIPT_DIR}/nas_sync.sh${NC}
 
-EXAMPLES:
-  # Initial setup
+${BOLD}INTEGRITY CHECKS:${NC}
+  A low-cost quick verify (size/mtime only, no data read) runs automatically
+  after every sync when VERIFY_AFTER_SYNC=true (default) in nas_sync.conf.
+  For a thorough but slow check that reads and compares file content, run:
+     ${CYAN}$0 check-deep${NC}
+     ${CYAN}$0 check-deep --pair backups${NC}   (substring-matches a pair's label)
+
+${BOLD}EXAMPLES:${NC}
+  ${DIM}# Initial setup${NC}
   $0 setup
 
-  # Dry run with verbose output
+  ${DIM}# Dry run with verbose output${NC}
   $0 --dry-run --debug
 
-  # Real run
+  ${DIM}# Real run${NC}
   $0
 
-  # Follow logs
+  ${DIM}# Follow logs${NC}
   $0 logs
 
-  # Reset app state
+  ${DIM}# Reset app state${NC}
   $0 reset
 
+  ${DIM}# Deep content check of all pairs (slow)${NC}
+  $0 check-deep
+
+  ${DIM}# Deep content check of one pair only${NC}
+  $0 check-deep --pair backups
+
 EOF
-    echo "COPY/PASTE COMMANDS (this host):"
+    echo -e "${BOLD}COPY/PASTE COMMANDS${NC} ${DIM}(this host)${NC}:"
     echo ""
-    echo "  Run sync manually:"
-    echo "    ${SCRIPT_DIR}/nas_sync.sh"
+    echo -e "  ${DIM}Run sync manually:${NC}"
+    echo -e "    ${CYAN}${SCRIPT_DIR}/nas_sync.sh${NC}"
     echo ""
-    echo "  Dry run (no changes written):"
-    echo "    ${SCRIPT_DIR}/nas_sync.sh --dry-run --debug"
+    echo -e "  ${DIM}Dry run (no changes written):${NC}"
+    echo -e "    ${CYAN}${SCRIPT_DIR}/nas_sync.sh --dry-run --debug${NC}"
     echo ""
-    echo "  CRON entry (nightly at 23:00):"
-    echo "    0 23 * * * ${SCRIPT_DIR}/nas_sync.sh"
+    echo -e "  ${DIM}CRON entry (nightly at 23:00):${NC}"
+    echo -e "    ${DIM}0 23 * * * ${SCRIPT_DIR}/nas_sync.sh${NC}"
     echo ""
 }
 
@@ -262,12 +292,14 @@ JABS_CLIENT="${SCRIPT_DIR}/jabs_client.py"
 
 # Defaults for JABS settings, so a nas_sync.conf from before this feature
 # existed still loads fine (JABS reporting simply stays disabled).
+JABS_AGENT_VERSION="${SCRIPT_VERSION}"
 : "${JABS_SERVER_URL:=}"
 : "${JABS_AGENT_KEY:=}"
-: "${JABS_HOSTNAME:=$(hostname)}"
-: "${JABS_IP_ADDRESS:=}"
-: "${JABS_AGENT_VERSION:=1.0.0}"
 : "${JABS_TIMEOUT:=10}"
+
+# Default for the post-sync quick verify, so a nas_sync.conf from before this
+# feature existed still loads fine (quick verify simply stays on by default).
+: "${VERIFY_AFTER_SYNC:=true}"
 
 # ── Advanced rsync flags ───────────────────────────────────────────────────
 # rsync -avh --progress --partial --append-verify --bwlimit=4500 /mnt/nas-unas/backups/video-archive/ /mnt/nas-kpf/jof/video-archive/
@@ -381,7 +413,7 @@ _exit_trap() {
         jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
             --message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)" \
             --run-id "${CURRENT_RUN_ID}" --job-name "${CURRENT_JOB_LABEL}" \
-            --backup-set-id "${CURRENT_JOB_LABEL}" --backup-set-name "${CURRENT_JOB_LABEL}" \
+            --group-id "${CURRENT_JOB_LABEL}" --group-label "${CURRENT_JOB_LABEL}" \
             --backup-type "sync" --duration-seconds "${duration}" \
             --files-backed-up 0 --bytes-backed-up 0 \
             --error-message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)"
@@ -425,7 +457,7 @@ uptime_kuma_ping() {
 #
 # Design note: unlike a versioned backup agent, each configured pair here is
 # an ongoing *mirror* rather than a rotating set of dated archives. So each
-# pair gets exactly one stable backup_set_id (derived from its label) that
+# pair gets exactly one stable group_id (derived from its label) that
 # is reused/updated on every run, rather than a new dated set per run.
 #
 # The dashboard purges its own job records on a universal, dashboard-side
@@ -462,8 +494,6 @@ jabs_event() {
     if ! output="$(python3 "${JABS_CLIENT}" event \
             --server-url "${JABS_SERVER_URL}" \
             --agent-key "${JABS_AGENT_KEY}" \
-            --hostname "${JABS_HOSTNAME}" \
-            --ip-address "${JABS_IP_ADDRESS}" \
             --version "${JABS_AGENT_VERSION}" \
             --agent-type "NAS Sync" \
             --timeout "${JABS_TIMEOUT}" \
@@ -511,7 +541,7 @@ check_dependencies() {
     if jabs_enabled; then
         command -v python3 &>/dev/null || missing+=("python3 (required by JABS_SERVER_URL)")
         [[ -f "${JABS_CLIENT}" ]] || die "JABS_SERVER_URL is set but ${JABS_CLIENT} is missing"
-        [[ -z "${JABS_AGENT_KEY}" ]] && die "JABS_SERVER_URL is set but JABS_AGENT_KEY is empty — register this agent on the dashboard's Hosts page and set its API key"
+        [[ -z "${JABS_AGENT_KEY}" ]] && die "JABS_SERVER_URL is set but JABS_AGENT_KEY is empty — register this agent on the dashboard's Agents page and set its API key"
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "Missing required commands: ${missing[*]}"
@@ -583,6 +613,105 @@ build_exclude_args() {
     done
 }
 
+# count_rsync_diffs CMD_ARRAY_NAME  →  runs an rsync --dry-run --itemize-changes
+# command and prints the count of changed (non-directory) items. rsync's
+# itemize output prefixes each changed item with an 11-char code (e.g.
+# ">f.st....... file.txt"); an already-in-sync tree prints nothing.
+_count_rsync_diffs() {
+    "$@" 2>/dev/null | grep -cE '^[<>ch.].{9} ' || true
+}
+
+# verify_pair_quick SRC DST LABEL  →  low-cost post-sync check: compares size
+# and mtime only (no file content is read), so it costs about the same as the
+# sync's own directory-listing pass. Prints the mismatch count; never reads
+# data and never fails the calling sync.
+verify_pair_quick() {
+    local src="$1" dst="$2" label="$3"
+    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --itemize-changes)
+    while IFS= read -r excl_arg; do
+        cmd+=("${excl_arg}")
+    done < <(build_exclude_args)
+    cmd+=("${src%/}/")
+    cmd+=("${dst%/}/")
+
+    local diff_count
+    diff_count="$(_count_rsync_diffs "${cmd[@]}")"
+    if [[ "${diff_count}" -gt 0 ]]; then
+        warn "Verify (quick): ${diff_count} item(s) still differ after sync: ${label}"
+    else
+        debug "Verify (quick) OK: ${label}"
+    fi
+    echo "${diff_count}"
+}
+
+# check_pair_deep SRC DST LABEL  →  thorough (slow) manual check: reads and
+# compares actual file content via rsync --checksum. Only ever invoked by the
+# check-deep subcommand, never automatically.
+check_pair_deep() {
+    local src="$1" dst="$2" label="$3"
+    if [[ ! -d "${src}" ]]; then
+        warn "Deep check skipped: ${label} (source missing)"
+        return 0
+    fi
+    if [[ ! -d "${dst}" ]]; then
+        warn "Deep check skipped: ${label} (dest missing)"
+        return 0
+    fi
+
+    info "Deep check (reads all data, slow): ${label}"
+    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --checksum --itemize-changes)
+    while IFS= read -r excl_arg; do
+        cmd+=("${excl_arg}")
+    done < <(build_exclude_args)
+    cmd+=("${src%/}/")
+    cmd+=("${dst%/}/")
+
+    local diff_count
+    diff_count="$(_count_rsync_diffs "${cmd[@]}")"
+    if [[ "${diff_count}" -eq 0 ]]; then
+        info "Deep check OK: ${label} (0 mismatched files)"
+    else
+        warn "Deep check found ${diff_count} mismatched file(s): ${label}"
+    fi
+}
+
+# run_check_deep [--pair SUBSTRING]  →  runs check_pair_deep across all
+# configured pairs, or only those whose label contains SUBSTRING.
+run_check_deep() {
+    local filter=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pair) filter="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    check_nfs_mount "${NAS1_MOUNT}" "NAS1"
+    check_nfs_mount "${NAS2_MOUNT}" "NAS2"
+
+    local ran_any=false
+    for pair in "${NAS1_TO_NAS2_PAIRS[@]}"; do
+        local src_sub="${pair%%:*}" dst_sub="${pair##*:}"
+        local label="NAS1:${src_sub} → NAS2:${dst_sub}"
+        [[ -n "${filter}" && "${label}" != *"${filter}"* ]] && continue
+        check_pair_deep "${NAS1_MOUNT}/${src_sub}" "${NAS2_MOUNT}/${dst_sub}" "${label}"
+        ran_any=true
+    done
+    for pair in "${NAS2_TO_NAS1_PAIRS[@]}"; do
+        local src_sub="${pair%%:*}" dst_sub="${pair##*:}"
+        local label="NAS2:${src_sub} → NAS1:${dst_sub}"
+        [[ -n "${filter}" && "${label}" != *"${filter}"* ]] && continue
+        check_pair_deep "${NAS2_MOUNT}/${src_sub}" "${NAS1_MOUNT}/${dst_sub}" "${label}"
+        ran_any=true
+    done
+
+    if ! ${ran_any}; then
+        err "No pairs matched --pair \"${filter}\""
+        return 1
+    fi
+    return 0
+}
+
 # sync_pair SOURCE_DIR DEST_DIR LABEL BWLIMIT_KB
 #   Returns 0 on success, non-zero on failure.
 sync_pair() {
@@ -632,8 +761,8 @@ sync_pair() {
         CURRENT_JOB_START_EPOCH="$(date +%s)"
     fi
 
-    # backup_set_name is a display label; for nas_sync_agent this is the
-    # same as the stable per-pair job_name/backup_set_id, since this is an
+    # group_label is a display label; for nas_sync_agent this is the
+    # same as the stable per-pair job_name/group_id, since this is an
     # ongoing mirror (not a dated set) — there is only ever one backup set
     # per pair, and it should always group under that one label on the
     # dashboard.
@@ -644,8 +773,8 @@ sync_pair() {
         --run-id "${run_id}" \
         --job-name "${label}" \
         --backup-type "sync" \
-        --backup-set-id "${label}" \
-        --backup-set-name "${label}" \
+        --group-id "${label}" \
+        --group-label "${label}" \
         --source "${src}" \
         --destination "${dst}" \
         --sync true
@@ -695,8 +824,8 @@ sync_pair() {
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "Deadline reached before ${label} could start (resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up 0 --bytes-backed-up 0 \
                 --error-message "Deadline reached before ${label} could start (resumes next run)"
@@ -745,8 +874,8 @@ sync_pair() {
             PAIR_RESULTS+=("OK    ${label}")
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete" --stage "Completed" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -759,8 +888,8 @@ sync_pair() {
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete with warnings (rsync exit ${exit_code}, some files skipped)" \
                 --stage "Completed (partial)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -776,8 +905,8 @@ sync_pair() {
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "${label} interrupted (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}" \
@@ -793,8 +922,8 @@ sync_pair() {
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
                 --message "${label} stopped at deadline (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}" \
@@ -806,8 +935,8 @@ sync_pair() {
             (( FAILED_PAIRS++ )) || true
             jabs_event --event-type "error" --status "failed" \
                 --message "Sync failed: ${label}" --stage "Error" \
-                --run-id "${run_id}" --job-name "${label}" --backup-set-id "${label}" \
-                --backup-set-name "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --error-code "${exit_code}" \
                 --error-message "rsync exit code ${exit_code}"
@@ -815,6 +944,19 @@ sync_pair() {
             return 1
             ;;
     esac
+
+    if [[ "${VERIFY_AFTER_SYNC}" == "true" ]] && ! $DRY_RUN && [[ ${exit_code} -eq 0 || ${exit_code} -eq 23 || ${exit_code} -eq 24 ]]; then
+        local mismatch_count
+        mismatch_count="$(verify_pair_quick "${src}" "${dst}" "${label}")"
+        if [[ "${mismatch_count}" -gt 0 ]]; then
+            jabs_event --event-type "heartbeat" --status "success" \
+                --message "Sync completed but quick verify found ${mismatch_count} differing item(s)" \
+                --stage "Verify (quick)" \
+                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
+                --group-label "${label}" --backup-type "sync"
+        fi
+    fi
+
     CURRENT_RUN_ID=""
     return 0
 }
@@ -876,7 +1018,7 @@ main() {
     check_dependencies
 
     # ── JABS — bare heartbeat ────────────────────────────────────────────────
-    # No event_type/backup_set_id → server just records host online + version,
+    # No event_type/group_id → server just records host online + version,
     # without touching any backup job. Sent once per run regardless of
     # whether any pairs end up running.
     jabs_event --message "nas_sync run started"
@@ -992,5 +1134,14 @@ main() {
     # Exit non-zero if any pair failed so cron/monitoring can catch it
     [[ ${FAILED_PAIRS} -eq 0 ]]
 }
+
+if [[ "${1:-}" == "check-deep" ]]; then
+    shift
+    # Manual diagnostic command — never treat its exit code as an unexpected
+    # crash (that would fire the EXIT trap's Uptime Kuma "down" ping).
+    _COMPLETED=true
+    run_check_deep "$@"
+    exit $?
+fi
 
 main "$@"

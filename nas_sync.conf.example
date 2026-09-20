@@ -35,6 +35,15 @@ STOP_HOUR=8
 # ── Log retention ─────────────────────────────────────────────────────────
 LOG_RETENTION_DAYS=30
 
+# ── Integrity checks ──────────────────────────────────────────────────────
+# Low-cost quick verify after every sync: an rsync --dry-run comparison of
+# size/mtime only (no file content is read), so it costs about the same as
+# the sync's own scan. Any leftover differences are logged and reported to
+# JABS, but never fail the already-completed sync. Set to "false" to disable.
+# For a thorough (slow) check that reads and compares actual file content,
+# run manually: ./nas_sync.sh check-deep [--pair NAME]
+VERIFY_AFTER_SYNC=true
+
 # ── Uptime Kuma telemetry ────────────────────────────────────────────
 # Create a Push monitor in Uptime Kuma, then paste its push URL below.
 # Sends up/down heartbeats so failures and missed runs trigger alerts.
@@ -47,7 +56,7 @@ UPTIME_KUMA_URL=""
 # https://github.com/<org>/jabs). Requires python3. Set JABS_SERVER_URL="" to
 # disable — everything below is then ignored.
 #
-# IMPORTANT: register this agent on the JABS dashboard's Hosts page first —
+# IMPORTANT: register this agent on the JABS dashboard's Agents page first —
 # there is no self-registration API. Registering returns a unique API key;
 # paste it into JABS_AGENT_KEY below. Each agent instance (even multiple on
 # the same machine) should get its own key.
@@ -55,11 +64,6 @@ JABS_SERVER_URL="http://10.10.2.10:5001"
 
 # API key for this agent, generated when you register it on the dashboard.
 JABS_AGENT_KEY=""
-
-# Informational only (shown on the Hosts page; not used for authentication).
-JABS_HOSTNAME="$(hostname)"
-JABS_IP_ADDRESS=""
-# JABS_IP_ADDRESS="192.168.1.50"
 
 # Reported on the host record; bump when you change this script.
 JABS_AGENT_VERSION="0.2.0"

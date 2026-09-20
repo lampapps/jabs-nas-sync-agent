@@ -20,21 +20,21 @@ Design goals, matching the guide's "treat as fire-and-forget" note:
 
 Auth: every request must include the agent's API key via the `--agent-key`
 argument (or the JABS_AGENT_KEY environment variable), sent as the
-X-API-Key header. Register the agent on the dashboard's Hosts page to
+X-API-Key header. Register the agent on the dashboard's Agents page to
 obtain a key.
 
 Usage:
-    jabs_client.py event --server-url URL --agent-key KEY --hostname H \\
-        --ip-address IP [--version V] [--agent-type T] [--event-type E] \\
-        [--message M] [--stage S] [--run-id R] [--backup-set-id ID] \\
-        [--backup-set-name N] [--job-name J] [--backup-type T] \\
+    jabs_client.py event --server-url URL --agent-key KEY \
+        [--version V] [--agent-type T] [--event-type E] \
+        [--message M] [--stage S] [--run-id R] [--group-id ID] \\
+        [--group-label N] [--job-name J] [--backup-type T] \\
         [--source S] [--destination D] [--encrypt true|false] \\
         [--sync true|false] [--status success|failed] \\
         [--duration-seconds F] [--files-backed-up N] \\
         [--bytes-backed-up N] [--bytes-compressed N] \\
         [--error-code N] [--error-message M] [--timeout SEC]
 
-Omit a --event-type and --backup-set-id on `event` to send a bare
+Omit a --event-type and --group-id on `event` to send a bare
 heartbeat (no backup job created/updated) — see AGENTS_API_GUIDE.md.
 
 See AGENTS_API_GUIDE.md for full field semantics and server behavior.
@@ -82,10 +82,7 @@ def _report(status, body):
 
 
 def cmd_event(args):
-    payload = {
-        "hostname": args.hostname,
-        "ip_address": args.ip_address,
-    }
+    payload = {}
 
     optional_str = {
         "version": args.version,
@@ -94,8 +91,8 @@ def cmd_event(args):
         "message": args.message,
         "stage": args.stage,
         "run_id": args.run_id,
-        "backup_set_id": args.backup_set_id,
-        "backup_set_name": args.backup_set_name,
+        "group_id": args.group_id,
+        "group_label": args.group_label,
         "job_name": args.job_name,
         "backup_type": args.backup_type,
         "source": args.source,
@@ -139,8 +136,6 @@ def build_parser():
     common.add_argument("--server-url", required=True, help="e.g. http://jabs-server:5001")
     common.add_argument("--agent-key", default=os.environ.get("JABS_AGENT_KEY"),
                          help="API key for this agent (default: JABS_AGENT_KEY env var)")
-    common.add_argument("--hostname", required=True)
-    common.add_argument("--ip-address", required=True)
     common.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
 
     ev = sub.add_parser("event", parents=[common], help="POST /api/monitoring/events")
@@ -150,8 +145,8 @@ def build_parser():
     ev.add_argument("--message")
     ev.add_argument("--stage")
     ev.add_argument("--run-id")
-    ev.add_argument("--backup-set-id")
-    ev.add_argument("--backup-set-name")
+    ev.add_argument("--group-id")
+    ev.add_argument("--group-label")
     ev.add_argument("--job-name")
     ev.add_argument("--backup-type")
     ev.add_argument("--source")
