@@ -1,16 +1,21 @@
 # nas_sync — Bidirectional NAS Sync over NFS / Tailscale
 
-Nightly rsync job that mirrors directories between two NAS devices.  
-The script runs on a **client machine** that has both NAS devices mounted as drives. This was designed to work using NFS mounts over Tailscale but may work with any two mounts available to the client running the script.
+Nightly rsync job that mirrors directories between two NAS devices. It first syncs NAS1 to NAS2, then NAS2 to NAS1, allowing the two NAS devices to act as backups for each other. rsync is run with the --delete option, which removes files from the destination that no longer exist in the source, so a file deleted from one NAS will be deleted on the other. Enabling snapshots on the NAS devices will preserve accidental deletions.
+
+Caution: Do not configure the second sync to write back to the same folders on NAS1 that the first sync copies from. When rsync runs with --delete, the two passes would conflict, and files could be overwritten or deleted unexpectedly.
+
+The script runs on a client machine that has NAS1 mounted via NFS. NAS2 is reached directly over its own rsync daemon (e.g. ASUSTOR ADM's "Rsync Server") over Tailscale — NAS2 is **not** mounted, so rsync's own delta-transfer and auth handle the WAN hop instead of NFS.
 
 ---
 
 ## Topology
 
-- **NAS1** — same physical LAN as the client; NFS traffic stays local.  
-- **NAS2** — same physical LAN or at remote site; NFS traffic crosses the Tailscale tunnel between the
-  two ISP uplinks.  The `BWLIMIT_NAS1_TO_NAS2` / `BWLIMIT_NAS2_TO_NAS1` settings
-  cap rsync's throughput per direction to protect both ISP connections.
+- **NAS1** — same physical LAN as the client; mounted via NFS, traffic stays local.
+- **NAS2** — remote, reachable over Tailscale; **not mounted**. The client's rsync talks
+  directly to NAS2's rsync daemon (module auth via `NAS2_RSYNC_USER`/`NAS2_RSYNC_PASSWORD_FILE`).
+  The `BWLIMIT_NAS1_TO_NAS2` / `BWLIMIT_NAS2_TO_NAS1` settings cap rsync's throughput per
+  direction to protect both ISP connections (optional if a router-level QoS/SQM already
+  manages bufferbloat on the link).
 
 ---
 
@@ -40,9 +45,27 @@ sudo apt install rsync util-linux bc curl
 sudo dnf install rsync util-linux bc curl
 ```
 
-### 2. Configure NFS mounts
+### 2. Configure NAS1's NFS mount and NAS2's rsync daemon
 
-Ensure both NAS devices are reachable from the client running the script as mounted devices.
+**NAS1** — ensure it's reachable from the client as a mounted NFS drive, same as before.
+
+**NAS2 (ASUSTOR)** — set up ADM's **Rsync Server** instead of mounting it:
+1. Enable the Rsync Server app/service (Control Panel → Services, or App Central if not
+   installed; location varies by ADM version).
+2. Create one rsync module covering the shared folder you want to sync against (pick it
+   from ADM's shared-folder list when defining the module), with **read/write** enabled —
+   both directions need it (NAS1→NAS2 writes, NAS2→NAS1 reads).
+3. Create a dedicated rsync user/password for this module (not an ADM admin account).
+4. Restrict ADM's allowed-hosts for the module to the client's own Tailscale IP, and make
+   sure port 873 isn't exposed on the Asustor's WAN-facing firewall rule.
+5. On the client, create the module's password file referenced by
+   `NAS2_RSYNC_PASSWORD_FILE` below, containing only the password, then `chmod 600` it —
+   this file is gitignored and must never be committed.
+6. Verify reachability before running the script for real:
+   ```bash
+   rsync --password-file=/path/to/nas2.rsync.secret --contimeout=10 --list-only \
+     user@<nas2-tailscale-ip>::<module>/
+   ```
 
 ### 3. Create `nas_sync.conf`
 
@@ -54,14 +77,20 @@ Then edit `nas_sync.conf` and set your values:
 
 | Variable | Description |
 | --- | --- |
-| `NAS1_MOUNT` | Local mount point for NAS1 |
-| `NAS2_MOUNT` | Local mount point for NAS2 |
+| `NAS1_MOUNT` | Local NFS mount point for NAS1 |
+| `NAS2_RSYNC_HOST` | NAS2's Tailscale IP or MagicDNS name (rsync daemon, not mounted) |
+| `NAS2_RSYNC_MODULE` | ADM Rsync Server module name on NAS2 |
+| `NAS2_RSYNC_USER` | Username for the NAS2 rsync module |
+| `NAS2_RSYNC_PASSWORD_FILE` | Path to a `chmod 600` file containing only the module password (gitignored, never the password itself in `nas_sync.conf`) |
 | `BWLIMIT_NAS1_TO_NAS2` | rsync bandwidth cap **NAS1→NAS2** in **KB/s** (limit by NAS1 upload speed) |
 | `BWLIMIT_NAS2_TO_NAS1` | rsync bandwidth cap **NAS2→NAS1** in **KB/s** (limit by NAS2 upload speed) |
-| `MIN_FREE_BYTES` | Minimum free space required on destination before syncing |
-| `STOP_HOUR` | Hard stop hour in 24-hour local time (e.g. `8` = 08:00). rsync is sent SIGTERM at this time and `--partial` saves progress for the next run to resume. Set to `""` to disable. |
+| `MIN_FREE_BYTES` | Minimum free space required on NAS1 before syncing **into** it (NAS2→NAS1 direction only — NAS2 is a remote daemon target, so free space can't be checked for NAS1→NAS2) |
+| `STOP_HOUR` | Hard stop hour in 24-hour local time (e.g. `8` = 08:00). rsync is sent SIGTERM at this time and `--partial` saves progress for the next run to resume. Set to `""` to disable. See also `./nas_sync.sh stop` to trigger the same graceful stop on demand. |
 | `LOG_RETENTION_DAYS` | How many days of logs to keep (default `30`) |
 | `VERIFY_AFTER_SYNC` | Run a low-cost quick verify after each sync (default `true`). See [Integrity checks](#integrity-checks) below. |
+| `RSYNC_COMPRESS` | Enable rsync's `--compress` for in-transit compression (default `false`). Trades CPU for WAN bandwidth — helps compressible data, little/no benefit for already-compressed formats. Benchmark a real run before relying on it. |
+| `RSYNC_COMPRESS_LEVEL` | Compression level `1` (fastest/least) to `9` (slowest/most); empty uses rsync's own default (~6). Only used when `RSYNC_COMPRESS=true`. |
+| `RSYNC_SKIP_COMPRESS` | Comma-separated filename suffixes to exclude from compression (passed to `--skip-compress`); empty uses rsync's built-in default list. Only used when `RSYNC_COMPRESS=true`. |
 | `UPTIME_KUMA_URL` | Uptime Kuma push monitor URL (set to `""` to disable) |
 | `NAS1_TO_NAS2_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS1→NAS2** |
 | `NAS2_TO_NAS1_PAIRS` | Array of `"src_subdir:dst_subdir"` pairs synced **NAS2→NAS1** |
@@ -123,13 +152,17 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
 
 ## How it works
 
-1. **Dependency check** — verifies `rsync`, `flock`, `df`, `mountpoint` are available.
+1. **Dependency check** — verifies `rsync`, `flock`, `df`, `mountpoint` are available, and that `NAS2_RSYNC_PASSWORD_FILE` exists (warns if its permissions aren't `600`).
 2. **Lock** — acquires an exclusive `flock` on `nas_sync.lock` (alongside the
    script) so concurrent cron overlaps are prevented.
-3. **Mount verification** — confirms each mount is alive with `mountpoint -q`
-   and a `stat` call; aborts early on stale/missing mounts.
-4. **Free space check** — skips a sync direction if the destination has less than
-   `MIN_FREE_BYTES` free.
+3. **Connectivity verification** — confirms NAS1's mount is alive with
+   `mountpoint -q` and a `stat` call, and confirms NAS2's rsync daemon module
+   is reachable and the configured credentials are accepted (`rsync
+   --list-only` against the module root); aborts early on failure.
+4. **Free space check** — skips the NAS2→NAS1 direction if NAS1 (the
+   destination for that direction) has less than `MIN_FREE_BYTES` free. NAS2
+   is a remote rsync-daemon target, not a local mount, so this check doesn't
+   apply to the NAS1→NAS2 direction.
 5. **Deadline setup** — if `STOP_HOUR` is set, converts it to an absolute epoch
    (automatically rolls to tomorrow when the script starts before midnight and the
    stop hour is the following morning, e.g. start 23:00 / stop 08:00).
@@ -141,6 +174,9 @@ Cron output is appended to `logs/cron.log` alongside the per-run timestamped log
    - `--bwlimit` (ISP protection)
    - `--timeout` (abandon stalled connections after 5 min)
    - `timeout <remaining_seconds>` wrapper (enforces `STOP_HOUR` deadline)
+   - `TERM`/`INT` trap — forwards the signal straight to the running rsync, so
+     `./nas_sync.sh stop` (see [Stopping a run early](#stopping-a-run-early))
+     triggers the same graceful partial-save behavior as the `STOP_HOUR` deadline
 7. **Result tracking** — exit codes 23/24 (partial transfer) are treated as
    warnings, not failures; exit code 124 (deadline timeout) and a stop before
    a pair even starts are reported to JABS as a finalized `stopped` status
@@ -186,6 +222,23 @@ automatically.
 
 ---
 
+## Stopping a run early
+
+`./nas_sync.sh stop` sends a graceful `SIGTERM` to the currently running sync —
+same effect as reaching `STOP_HOUR`: the in-flight file finishes, `--partial`
+saves progress, and the current pair (and any not yet started) resumes on the
+next run.
+
+```bash
+./nas_sync.sh stop
+```
+
+It reads the PID from `nas_sync.pid` (written next to the script while a sync
+is running, removed on normal completion). If no sync is running, the command
+reports that and exits non-zero.
+
+---
+
 ## Logs
 
 Logs are written to the `logs/` subdirectory alongside the script:
@@ -214,9 +267,8 @@ job, via `jabs_client.py` (a small stdlib-only Python HTTP client — no
 Enable it in `nas_sync.conf`:
 
 ```bash
-JABS_SERVER_URL="http://jabs-server:5001"
+JABS_DASHBOARD_URL="http://jabs-server:5001"
 JABS_AGENT_KEY=""                # paste the key from the dashboard here
-JABS_AGENT_VERSION="1.0.0"
 JABS_TIMEOUT=10
 ```
 
@@ -233,10 +285,14 @@ each with its own key.
 `NAS2_TO_NAS1_PAIRS` entry is reported as one job, identified by its label
 (e.g. `NAS1:backups → NAS2:backups`). Unlike a versioned backup agent, a
 mirror sync doesn't produce rotating dated archives, so each pair uses one
-stable `group_id` that's simply updated on every run rather than a new
+stable `target_id` that's simply updated on every run rather than a new
 one per day. Every run sends:
 
 - a start event when the pair begins,
+- periodic progress updates (~5s, best-effort) while rsync runs, parsed from
+  `--info=progress2` output: percent-complete and transfer rate, so the
+  dashboard's Agent Detail page can show a live progress bar. Locally, these
+  are logged only on each 10% crossed (not every tick).
 - a completion event (`backup_complete` or `error`) when it finishes, with
   duration and file/byte counts pulled from rsync's `--stats` output,
 - or, if the pair is stopped by `STOP_HOUR` or a signal before finishing, a
@@ -253,10 +309,9 @@ its own universal, dashboard-side retention schedule `retention.max_days`,
 `LOG_RETENTION_DAYS` here only controls pruning of this script's own local
 log files.
 
-Reporting is fire-and-forget and best-effort: it's skipped entirely during
-`--dry-run`, and any failure (server unreachable, bad response, `python3`
+Reporting is fire-and-forget and best-effort: any failure (server unreachable, bad response, `python3`
 missing) is logged as a warning but never fails the sync itself. Set
-`JABS_SERVER_URL=""` to disable it completely.
+`JABS_DASHBOARD_URL=""` to disable it completely.
 
 ---
 
@@ -264,15 +319,17 @@ missing) is logged as a warning but never fails the sync itself. Set
 
 | Symptom | Check |
 | --- | --- |
-| "not mounted" error | `mountpoint /mnt/nas1` and `mount` — is the NFS share up? |
+| "not mounted" error (NAS1) | `mountpoint /mnt/nas1` and `mount` — is the NFS share up? |
+| NAS2 rsync daemon unreachable/auth rejected | `rsync --password-file=... --contimeout=10 --list-only user@host::module/`; check ADM's Rsync Server is running, the allowed-hosts list includes this client's Tailscale IP, and `NAS2_RSYNC_PASSWORD_FILE` matches the module password |
 | "not NFS" warning | `/proc/mounts`: the script warns but continues |
 | Stalled transfers | Increase `--timeout`; check Tailscale connectivity (`tailscale ping`) |
 | High WAN usage | Lower `BWLIMIT_NAS1_TO_NAS2` / `BWLIMIT_NAS2_TO_NAS1`; units are KB/s, not Mbps |
 | Uptime Kuma not pinging | Verify `curl` is installed; test manually: `curl "${UPTIME_KUMA_URL}?status=up&msg=test&ping="` |
 | Partial transfers (exit 23/24) | Permissions or vanished files; check the log for specifics |
 | Lock not released | `rm nas_sync.lock` if you are certain no run is active |
-| Run stops before finishing | Expected if `STOP_HOUR` is set — the next cron run resumes automatically via `--partial` |
+| Run stops before finishing | Expected if `STOP_HOUR` is set, or if `./nas_sync.sh stop` was run — the next cron run resumes automatically via `--partial` |
 | `STOP_HOUR` not taking effect | Ensure the value is a plain integer (0–23) with no quotes; check the log for the "Deadline :" line |
+| `./nas_sync.sh stop` says no PID file | No sync is currently running, or it already finished before the signal was sent |
 | JABS events not showing up | Confirm `python3` is installed; confirm `JABS_AGENT_KEY` is set and matches a key generated on the JABS dashboard's Agents page (missing key -> `401`, invalid/disabled key -> `403`, logged as a `WARN`) |
 | "Verify (quick)" warnings | Some files still differ by size/mtime right after a sync; often transient (files still being written on the source) — re-run, or use `./nas_sync.sh check-deep --pair NAME` to confirm with actual content |
 

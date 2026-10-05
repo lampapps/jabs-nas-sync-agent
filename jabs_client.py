@@ -26,15 +26,17 @@ obtain a key.
 Usage:
     jabs_client.py event --server-url URL --agent-key KEY \
         [--version V] [--agent-type T] [--event-type E] \
-        [--message M] [--stage S] [--run-id R] [--group-id ID] \\
-        [--group-label N] [--job-name J] [--backup-type T] \\
+        [--message M] [--stage S] [--run-id R] [--job-run-id ID] [--target-id ID] \\
+        [--target-label N] [--job-name J] [--backup-type T] \\
         [--source S] [--destination D] [--encrypt true|false] \\
         [--sync true|false] [--status success|failed] \\
         [--duration-seconds F] [--files-backed-up N] \\
         [--bytes-backed-up N] [--bytes-compressed N] \\
+        [--percent-complete N] [--bytes-per-second F] \\
+        [--eta-seconds N] [--current-item PATH] \\
         [--error-code N] [--error-message M] [--timeout SEC]
 
-Omit a --event-type and --group-id on `event` to send a bare
+Omit a --event-type and --target-id on `event` to send a bare
 heartbeat (no backup job created/updated) — see AGENTS_API_GUIDE.md.
 
 See AGENTS_API_GUIDE.md for full field semantics and server behavior.
@@ -91,14 +93,17 @@ def cmd_event(args):
         "message": args.message,
         "stage": args.stage,
         "run_id": args.run_id,
-        "group_id": args.group_id,
-        "group_label": args.group_label,
+        "job_run_id": args.job_run_id,
+        "target_id": args.target_id,
+        "target_label": args.target_label,
         "job_name": args.job_name,
         "backup_type": args.backup_type,
         "source": args.source,
         "destination": args.destination,
         "status": args.status,
+        "current_item": args.current_item,
         "error_message": args.error_message,
+        "cron_schedule": args.cron_schedule,
     }
     for key, val in optional_str.items():
         if val is not None and val != "":
@@ -116,6 +121,12 @@ def cmd_event(args):
         payload["bytes_backed_up"] = args.bytes_backed_up
     if args.bytes_compressed is not None:
         payload["bytes_compressed"] = args.bytes_compressed
+    if args.percent_complete is not None:
+        payload["percent_complete"] = args.percent_complete
+    if args.bytes_per_second is not None:
+        payload["bytes_per_second"] = args.bytes_per_second
+    if args.eta_seconds is not None:
+        payload["eta_seconds"] = args.eta_seconds
     if args.error_code is not None:
         payload["error_code"] = args.error_code
 
@@ -145,8 +156,9 @@ def build_parser():
     ev.add_argument("--message")
     ev.add_argument("--stage")
     ev.add_argument("--run-id")
-    ev.add_argument("--group-id")
-    ev.add_argument("--group-label")
+    ev.add_argument("--job-run-id", help="Shared ID for every target/pair in one overall script invocation")
+    ev.add_argument("--target-id")
+    ev.add_argument("--target-label")
     ev.add_argument("--job-name")
     ev.add_argument("--backup-type")
     ev.add_argument("--source")
@@ -158,8 +170,13 @@ def build_parser():
     ev.add_argument("--files-backed-up", type=int)
     ev.add_argument("--bytes-backed-up", type=int)
     ev.add_argument("--bytes-compressed", type=int)
+    ev.add_argument("--percent-complete", type=int)
+    ev.add_argument("--bytes-per-second", type=float)
+    ev.add_argument("--eta-seconds", type=int)
+    ev.add_argument("--current-item")
     ev.add_argument("--error-code", type=int)
     ev.add_argument("--error-message")
+    ev.add_argument("--cron-schedule", help="Comma-separated cron expression(s) for job_name's schedule")
     ev.set_defaults(func=cmd_event)
 
     return parser

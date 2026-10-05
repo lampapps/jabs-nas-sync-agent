@@ -4,11 +4,10 @@
 # =============================================================================
 #
 # TOPOLOGY
-#   Client (this machine) has both NAS devices mounted via NFS.
-#   NAS1 is on the same LAN as this client.
-#   NAS2 is remote, reachable over Tailscale.
-#   rsync reads/writes NFS mount points locally; all WAN traffic flows over
-#   the Tailscale tunnel between the two NAS devices' host ISPs.
+#   NAS1 is mounted via NFS, same LAN as this client (no WAN hop).
+#   NAS2 is remote, reachable over Tailscale, and is NOT mounted — rsync
+#   talks directly to its ADM "Rsync Server" daemon over the Tailscale
+#   tunnel, so delta-transfer applies to the WAN hop instead of raw NFS I/O.
 #
 # SYNC MODEL
 #   Bidirectional — configured as two independent sets of one-way pairs:
@@ -23,6 +22,7 @@
 #   Debug/verbose:  ./nas_sync.sh --debug
 #   Both:           ./nas_sync.sh --dry-run --debug
 #   Deep check:     ./nas_sync.sh check-deep [--pair NAME]
+#   Stop run:       ./nas_sync.sh stop
 #   Cron (nightly): see README.md
 #
 # INTEGRITY CHECKS
@@ -63,7 +63,7 @@
 #
 #   readlink     — resolves SCRIPT_DIR at runtime (part of coreutils)
 #
-#   python3      — only required if JABS_SERVER_URL is set (see below).
+#   python3      — only required if JABS_DASHBOARD_URL is set (see below).
 #                  Used to run jabs_client.py, which reports sync activity
 #                  to a JABS dashboard's Agent Monitoring API.
 #                  Debian/Ubuntu : sudo apt install python3
@@ -75,7 +75,7 @@ IFS=$'\n\t'
 
 # Reported to the JABS dashboard as this agent's version; bump when you
 # change this script.
-readonly SCRIPT_VERSION="0.2.2"
+readonly SCRIPT_VERSION="0.3.0"
 
 # Resolve the directory this script lives in (works regardless of cwd)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -146,10 +146,12 @@ cmd_setup() {
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
     echo -e "  1. Edit: ${CYAN}${conf_file}${NC}"
-    echo "  2. (Optional) Configure JABS_SERVER_URL/JABS_AGENT_KEY in that file to report to a dashboard"
-    echo -e "  3. Test:   ${CYAN}$0 --dry-run --debug${NC}"
-    echo -e "  4. Run:    ${CYAN}$0${NC}"
-    echo -e "  5. Add a CRON job for nightly runs (see: ${CYAN}$0 help${NC})"
+    echo "  2. Create the NAS2 rsync module password file (chmod 600) at the path"
+    echo "     set by NAS2_RSYNC_PASSWORD_FILE in that config"
+    echo "  3. (Optional) Configure JABS_DASHBOARD_URL/JABS_AGENT_KEY in that file to report to a dashboard"
+    echo -e "  4. Test:   ${CYAN}$0 --dry-run --debug${NC}"
+    echo -e "  5. Run:    ${CYAN}$0${NC}"
+    echo -e "  6. Add a CRON job for nightly runs (see: ${CYAN}$0 help${NC})"
 }
 
 cmd_logs() {
@@ -163,6 +165,24 @@ cmd_logs() {
         print_error "No log files found in: ${log_dir}"
         return 1
     fi
+}
+
+cmd_stop() {
+    local pid_file="${SCRIPT_DIR}/nas_sync.pid"
+    if [[ ! -f "${pid_file}" ]]; then
+        print_error "No PID file found (${pid_file}) — is a sync running?"
+        return 1
+    fi
+    local pid
+    pid="$(<"${pid_file}")"
+    if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+        print_warning "PID file is stale (process ${pid:-unknown} not running) — removing it"
+        rm -f "${pid_file}"
+        return 1
+    fi
+    print_status "Sending graceful stop (SIGTERM) to running sync (pid ${pid})..."
+    kill -TERM "${pid}"
+    print_status "rsync will finish its current file and exit; --partial keeps progress for the next run."
 }
 
 cmd_reset() {
@@ -195,7 +215,7 @@ ${BOLD}NAS Sync Agent Launcher${NC}
 
 ${BOLD}USAGE:${NC}
   $0 [--dry-run] [--debug]
-  $0 {setup|logs|reset|check-deep|help}
+  $0 {setup|logs|reset|stop|check-deep|help}
 
 ${BOLD}COMMANDS:${NC}
   ${DIM}(no args)${NC}   Run the bidirectional sync (default cron invocation)
@@ -204,6 +224,7 @@ ${BOLD}COMMANDS:${NC}
   ${CYAN}setup${NC}       Create nas_sync.conf from the example, create logs/, check deps
   ${CYAN}logs${NC}        Follow the most recent run's log
   ${CYAN}reset${NC}       Reset app (clear logs, lock file)
+  ${CYAN}stop${NC}        Gracefully stop a currently running sync (like STOP_HOUR, but on demand)
   ${CYAN}check-deep${NC}  Manually verify pairs by comparing file content (slow, reads all data); add --pair NAME to check one pair only
   ${CYAN}help${NC}        Show this help message
 
@@ -242,6 +263,9 @@ ${BOLD}EXAMPLES:${NC}
   ${DIM}# Reset app state${NC}
   $0 reset
 
+  ${DIM}# Gracefully stop a currently running sync${NC}
+  $0 stop
+
   ${DIM}# Deep content check of all pairs (slow)${NC}
   $0 check-deep
 
@@ -266,6 +290,7 @@ case "${1:-}" in
     setup) cmd_setup; exit $? ;;
     logs)  cmd_logs;  exit $? ;;
     reset) cmd_reset; exit $? ;;
+    stop)  cmd_stop;  exit $? ;;
     help|-h|--help) cmd_help; exit 0 ;;
 esac
 
@@ -287,19 +312,34 @@ source "${CONF_FILE}"
 
 # Paths derived from SCRIPT_DIR (not user-configurable)
 LOCK_FILE="${SCRIPT_DIR}/nas_sync.lock"
+PID_FILE="${SCRIPT_DIR}/nas_sync.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 JABS_CLIENT="${SCRIPT_DIR}/jabs_client.py"
 
 # Defaults for JABS settings, so a nas_sync.conf from before this feature
 # existed still loads fine (JABS reporting simply stays disabled).
 JABS_AGENT_VERSION="${SCRIPT_VERSION}"
-: "${JABS_SERVER_URL:=}"
+# JABS_DASHBOARD_URL is the current name; JABS_SERVER_URL still works as a
+# deprecated alias for configs written before the Dashboard rename.
+: "${JABS_DASHBOARD_URL:=${JABS_SERVER_URL:-}}"
 : "${JABS_AGENT_KEY:=}"
 : "${JABS_TIMEOUT:=10}"
+: "${JOB_NAME:=NAS Sync}"
+
+# Optional: cron expression matching this script's crontab entry, reported
+# to the dashboard for the "Next Event" column. Purely advisory — this
+# script still only runs whenever cron actually invokes it.
+: "${JOB_CRON:=}"
 
 # Default for the post-sync quick verify, so a nas_sync.conf from before this
 # feature existed still loads fine (quick verify simply stays on by default).
 : "${VERIFY_AFTER_SYNC:=true}"
+
+# Defaults for optional in-transit compression, so a nas_sync.conf from
+# before this feature existed still loads fine (compression stays off).
+: "${RSYNC_COMPRESS:=false}"
+: "${RSYNC_COMPRESS_LEVEL:=}"
+: "${RSYNC_SKIP_COMPRESS:=}"
 
 # ── Advanced rsync flags ───────────────────────────────────────────────────
 # rsync -avh --progress --partial --append-verify --bwlimit=4500 /mnt/nas-unas/backups/video-archive/ /mnt/nas-kpf/jof/video-archive/
@@ -331,6 +371,15 @@ RSYNC_EXCLUDES=(
     ".Trash*/"
 )
 
+# Built from RSYNC_COMPRESS/_LEVEL/_SKIP_COMPRESS (see nas_sync.conf);
+# appended to every rsync command in sync_pair().
+RSYNC_COMPRESS_OPTS=()
+if [[ "${RSYNC_COMPRESS}" == "true" ]]; then
+    RSYNC_COMPRESS_OPTS+=(--compress)
+    [[ -n "${RSYNC_COMPRESS_LEVEL}" ]] && RSYNC_COMPRESS_OPTS+=("--compress-level=${RSYNC_COMPRESS_LEVEL}")
+    [[ -n "${RSYNC_SKIP_COMPRESS}" ]] && RSYNC_COMPRESS_OPTS+=("--skip-compress=${RSYNC_SKIP_COMPRESS}")
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # END OF CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,6 +399,13 @@ declare -a PAIR_RESULTS=()
 DEADLINE_EPOCH=0
 DEADLINE_REACHED=false
 
+# Manual-stop state. STOP_REQUESTED is set by _handle_stop_signal() (see
+# below); RSYNC_PID tracks the currently-running rsync (or its `timeout`
+# wrapper) so that handler can forward the signal to it immediately instead
+# of waiting for rsync to notice on its own.
+STOP_REQUESTED=false
+RSYNC_PID=""
+
 # In-flight job tracking. Set by sync_pair() around each pair's rsync call,
 # cleared once that pair is finalized. Lets the EXIT trap report a pair as
 # "stopped" on the dashboard if the whole script is killed mid-sync (e.g. an
@@ -359,6 +415,10 @@ CURRENT_RUN_ID=""
 CURRENT_JOB_LABEL=""
 CURRENT_JOB_START_EPOCH=0
 
+# Shared by every pair in one script invocation (set once in main()) so the
+# dashboard can group all pairs into a single "job run" via --job-run-id.
+JOB_RUN_ID=""
+
 # Dry-run and debug flags
 DRY_RUN=false
 DEBUG=false
@@ -366,6 +426,11 @@ for _arg in "$@"; do
     case "${_arg}" in
         --dry-run|-n) DRY_RUN=true ;;
         --debug|-v)   DEBUG=true  ;;
+        *)
+            echo "ERROR: Unknown argument: ${_arg}" >&2
+            echo "       Usage: $0 [--dry-run] [--debug]" >&2
+            exit 1
+            ;;
     esac
 done
 unset _arg
@@ -383,7 +448,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 log()   { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 info()  { log "INFO  $*"; }
 debug() { $DEBUG && log "DEBUG $*" || true; }
-warn()  { log "WARN  $*"; }
+warn()  { log "WARNING $*"; }
 err()   { log "ERROR $*" >&2; }
 die()   { err "$*"; uptime_kuma_ping "down" "$*"; exit 1; }
 
@@ -412,14 +477,32 @@ _exit_trap() {
         local duration=$(( $(date +%s) - ${CURRENT_JOB_START_EPOCH:-$(date +%s)} ))
         jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
             --message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)" \
-            --run-id "${CURRENT_RUN_ID}" --job-name "${CURRENT_JOB_LABEL}" \
-            --group-id "${CURRENT_JOB_LABEL}" --group-label "${CURRENT_JOB_LABEL}" \
+            --run-id "${CURRENT_RUN_ID}" --job-name "${JOB_NAME}" \
+            --target-id "${CURRENT_JOB_LABEL}" --target-label "${CURRENT_JOB_LABEL}" \
             --backup-type "sync" --duration-seconds "${duration}" \
             --files-backed-up 0 --bytes-backed-up 0 \
             --error-message "${CURRENT_JOB_LABEL} interrupted by unexpected script termination (resumes next run)"
     fi
 }
 trap '_exit_trap' EXIT
+
+# Manual stop (`./nas_sync.sh stop`, or any plain `kill <pid>`, sends TERM).
+# Mirrors STOP_HOUR's graceful-stop behavior but on demand: forward the
+# signal straight to the in-flight rsync (or its `timeout` wrapper, which
+# itself forwards on to rsync) so the current file finishes and --partial
+# saves progress, rather than letting bash defer the trap until rsync exits
+# on its own. If no rsync is running right now, the main loop checks
+# STOP_REQUESTED and stops before starting the next pair.
+_handle_stop_signal() {
+    STOP_REQUESTED=true
+    if [[ -n "${RSYNC_PID}" ]]; then
+        warn "Stop requested — forwarding SIGTERM to running rsync (pid ${RSYNC_PID})"
+        kill -TERM "${RSYNC_PID}" 2>/dev/null || true
+    else
+        warn "Stop requested — will stop before starting the next pair"
+    fi
+}
+trap '_handle_stop_signal' TERM INT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,11 +536,11 @@ uptime_kuma_ping() {
 # JABS AGENT MONITORING
 # ─────────────────────────────────────────────────────────────────────────────
 # Reports sync activity to a JABS dashboard's Agent Monitoring API (see
-# AGENT_API_GUIDE.md). Disabled entirely when JABS_SERVER_URL is empty.
+# AGENT_API_GUIDE.md). Disabled entirely when JABS_DASHBOARD_URL is empty.
 #
 # Design note: unlike a versioned backup agent, each configured pair here is
 # an ongoing *mirror* rather than a rotating set of dated archives. So each
-# pair gets exactly one stable group_id (derived from its label) that
+# pair gets exactly one stable target_id (derived from its label) that
 # is reused/updated on every run, rather than a new dated set per run.
 #
 # The dashboard purges its own job records on a universal, dashboard-side
@@ -465,7 +548,7 @@ uptime_kuma_ping() {
 # — this script has no API to tell the dashboard when to purge records, and
 # LOG_RETENTION_DAYS below only controls this script's own local log files.
 
-jabs_enabled() { [[ -n "${JABS_SERVER_URL}" ]]; }
+jabs_enabled() { [[ -n "${JABS_DASHBOARD_URL}" ]]; }
 
 # generate_uuid  →  prints a UUID (for run_id). Only called when JABS is
 # enabled, so python3's availability has already been confirmed by then.
@@ -479,25 +562,35 @@ generate_uuid() {
 
 # jabs_event [--flag value]...
 # Thin wrapper around jabs_client.py's `event` subcommand. Fire-and-forget:
-# no-ops when JABS is disabled or during --dry-run, and any failure (bad
-# response, network error, missing python3) is logged as a warning and never
-# aborts the calling sync. Extra args are passed straight through to
-# jabs_client.py — see its --help for the full list of event fields.
+# no-ops when JABS is disabled, and any failure (bad response, network
+# error, missing python3) is logged as a warning and never aborts the
+# calling sync. During --dry-run, events are still sent (so a dry run shows
+# up on the dashboard for testing) but the message is prefixed "[DRY RUN]",
+# matching local_sync_agent/snapshot_agent's convention. Extra args are
+# passed straight through to jabs_client.py — see its --help for the full
+# list of event fields.
 jabs_event() {
     jabs_enabled || return 0
+
+    local args=("$@")
     if ${DRY_RUN:-false}; then
-        debug "JABS (dry-run, not sent): $*"
-        return 0
+        local i
+        for i in "${!args[@]}"; do
+            if [[ "${args[$i]}" == "--message" ]]; then
+                args[$((i + 1))]="[DRY RUN] ${args[$((i + 1))]}"
+                break
+            fi
+        done
     fi
 
     local output
     if ! output="$(python3 "${JABS_CLIENT}" event \
-            --server-url "${JABS_SERVER_URL}" \
+            --server-url "${JABS_DASHBOARD_URL}" \
             --agent-key "${JABS_AGENT_KEY}" \
             --version "${JABS_AGENT_VERSION}" \
             --agent-type "NAS Sync" \
             --timeout "${JABS_TIMEOUT}" \
-            "$@" 2>&1)"; then
+            "${args[@]}" 2>&1)"; then
         warn "JABS event failed to send: ${output}"
         return 0
     fi
@@ -533,20 +626,102 @@ parse_rsync_bytes() {
     echo "scale=0; (${num}*${mult})/1" | bc
 }
 
+# parse_rsync_progress_line LINE  →  prints "PERCENT BYTES_PER_SEC" (space
+# separated) on a match, or returns 1 on a non-matching line. Matches
+# --info=progress2's overall-progress line, e.g.:
+#   "      1,234,567  43%   12.34MB/s    0:00:10 (xfr#5, to-chk=120/200)"
+parse_rsync_progress_line() {
+    local line="$1"
+    if [[ "${line}" =~ ([0-9]+)%[[:space:]]+([0-9.]+)(B|KB|MB|GB|TB)/s ]]; then
+        local percent="${BASH_REMATCH[1]}"
+        local rate_value="${BASH_REMATCH[2]}"
+        local rate_unit="${BASH_REMATCH[3]}"
+        local mult=1
+        case "${rate_unit}" in
+            KB) mult=1024 ;;
+            MB) mult=$((1024**2)) ;;
+            GB) mult=$((1024**3)) ;;
+            TB) mult=$((1024**4)) ;;
+        esac
+        local bps
+        bps="$(echo "scale=0; (${rate_value}*${mult})/1" | bc)"
+        echo "${percent} ${bps}"
+        return 0
+    fi
+    return 1
+}
+
+# watch_rsync_progress RUN_ID LABEL  →  reads rsync's --info=progress2
+# lines from stdin (one per line, after \r→\n translation), throttling both
+# the local log (10%-decile crossings) and the JABS progress POST (~5s
+# wall-clock) independently. Best-effort: a parse miss on any line is simply
+# skipped, never aborts the sync.
+watch_rsync_progress() {
+    local run_id="$1" label="$2"
+    local last_post=0 last_decile=-1
+    local line parsed percent bps decile now
+    while IFS= read -r line; do
+        parsed="$(parse_rsync_progress_line "${line}")" || continue
+        percent="${parsed%% *}"
+        bps="${parsed##* }"
+        decile=$(( percent / 10 ))
+        if (( decile > last_decile )); then
+            last_decile=${decile}
+            info "Progress: ${label} ${percent}%"
+        fi
+        now="$(date +%s)"
+        if (( now - last_post >= 5 )); then
+            last_post=${now}
+            jabs_event --event-type "heartbeat" --message "Sync in progress" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --backup-type "sync" \
+                --percent-complete "${percent}" --bytes-per-second "${bps}"
+        fi
+    done
+}
+
+
 check_dependencies() {
     local missing=()
     for cmd in rsync flock df mountpoint; do
         command -v "${cmd}" &>/dev/null || missing+=("${cmd}")
     done
     if jabs_enabled; then
-        command -v python3 &>/dev/null || missing+=("python3 (required by JABS_SERVER_URL)")
-        [[ -f "${JABS_CLIENT}" ]] || die "JABS_SERVER_URL is set but ${JABS_CLIENT} is missing"
-        [[ -z "${JABS_AGENT_KEY}" ]] && die "JABS_SERVER_URL is set but JABS_AGENT_KEY is empty — register this agent on the dashboard's Agents page and set its API key"
+        command -v python3 &>/dev/null || missing+=("python3 (required by JABS_DASHBOARD_URL)")
+        command -v tee &>/dev/null || missing+=("tee (required for JABS progress reporting)")
+        command -v stdbuf &>/dev/null || missing+=("stdbuf (required for JABS progress reporting)")
+        [[ -f "${JABS_CLIENT}" ]] || die "JABS_DASHBOARD_URL is set but ${JABS_CLIENT} is missing"
+        [[ -z "${JABS_AGENT_KEY}" ]] && die "JABS_DASHBOARD_URL is set but JABS_AGENT_KEY is empty — register this agent on the dashboard's Agents page and set its API key"
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "Missing required commands: ${missing[*]}"
     fi
+
+    [[ -f "${NAS2_RSYNC_PASSWORD_FILE}" ]] || die "NAS2_RSYNC_PASSWORD_FILE (${NAS2_RSYNC_PASSWORD_FILE}) not found — create it with the rsync module password (chmod 600)"
+    local _nas2_pw_perm
+    _nas2_pw_perm="$(stat -c '%a' "${NAS2_RSYNC_PASSWORD_FILE}" 2>/dev/null || echo '')"
+    [[ -n "${_nas2_pw_perm}" && "${_nas2_pw_perm}" != "600" ]] && warn "NAS2_RSYNC_PASSWORD_FILE permissions are ${_nas2_pw_perm}, expected 600 — run: chmod 600 ${NAS2_RSYNC_PASSWORD_FILE}"
+
     debug "Dependency check passed"
+}
+
+# nas2_target SUBDIR  →  prints the rsync daemon address for a module
+# subpath. Double-colon syntax keeps the password out of the command line;
+# it's supplied separately via --password-file (see sync_pair()).
+nas2_target() {
+    echo "${NAS2_RSYNC_USER}@${NAS2_RSYNC_HOST}::${NAS2_RSYNC_MODULE}/$1"
+}
+
+# Verify NAS2's rsync daemon module is reachable and the configured
+# credentials are accepted. Lists the module root (no data transferred);
+# dies on failure, matching check_nfs_mount's fail-fast style.
+check_rsync_daemon() {
+    local target
+    target="$(nas2_target '')"
+    if ! rsync --password-file="${NAS2_RSYNC_PASSWORD_FILE}" --contimeout=10 --list-only "${target}" &>/dev/null; then
+        die "NAS2 rsync daemon (${target}) is unreachable or rejected the configured credentials"
+    fi
+    debug "NAS2 rsync daemon OK: ${target}"
 }
 
 # Verify a path is a live NFS mount (not just a local directory).
@@ -627,7 +802,8 @@ _count_rsync_diffs() {
 # data and never fails the calling sync.
 verify_pair_quick() {
     local src="$1" dst="$2" label="$3"
-    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --itemize-changes)
+    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --itemize-changes \
+        --contimeout=10 "--password-file=${NAS2_RSYNC_PASSWORD_FILE}")
     while IFS= read -r excl_arg; do
         cmd+=("${excl_arg}")
     done < <(build_exclude_args)
@@ -649,17 +825,22 @@ verify_pair_quick() {
 # check-deep subcommand, never automatically.
 check_pair_deep() {
     local src="$1" dst="$2" label="$3"
-    if [[ ! -d "${src}" ]]; then
+
+    # Only a local path side can be existence-checked ahead of time; a
+    # remote rsync-daemon target ("::" syntax) is skipped here — rsync
+    # itself reports a clear error if the module/subpath is wrong.
+    if [[ "${src}" != *"::"* && ! -d "${src}" ]]; then
         warn "Deep check skipped: ${label} (source missing)"
         return 0
     fi
-    if [[ ! -d "${dst}" ]]; then
+    if [[ "${dst}" != *"::"* && ! -d "${dst}" ]]; then
         warn "Deep check skipped: ${label} (dest missing)"
         return 0
     fi
 
     info "Deep check (reads all data, slow): ${label}"
-    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --checksum --itemize-changes)
+    local -a cmd=(rsync --archive --no-owner --no-group --dry-run --checksum --itemize-changes \
+        --contimeout=10 "--password-file=${NAS2_RSYNC_PASSWORD_FILE}")
     while IFS= read -r excl_arg; do
         cmd+=("${excl_arg}")
     done < <(build_exclude_args)
@@ -687,21 +868,21 @@ run_check_deep() {
     done
 
     check_nfs_mount "${NAS1_MOUNT}" "NAS1"
-    check_nfs_mount "${NAS2_MOUNT}" "NAS2"
+    check_rsync_daemon
 
     local ran_any=false
     for pair in "${NAS1_TO_NAS2_PAIRS[@]}"; do
         local src_sub="${pair%%:*}" dst_sub="${pair##*:}"
         local label="NAS1:${src_sub} → NAS2:${dst_sub}"
         [[ -n "${filter}" && "${label}" != *"${filter}"* ]] && continue
-        check_pair_deep "${NAS1_MOUNT}/${src_sub}" "${NAS2_MOUNT}/${dst_sub}" "${label}"
+        check_pair_deep "${NAS1_MOUNT}/${src_sub}" "$(nas2_target "${dst_sub}")" "${label}"
         ran_any=true
     done
     for pair in "${NAS2_TO_NAS1_PAIRS[@]}"; do
         local src_sub="${pair%%:*}" dst_sub="${pair##*:}"
         local label="NAS2:${src_sub} → NAS1:${dst_sub}"
         [[ -n "${filter}" && "${label}" != *"${filter}"* ]] && continue
-        check_pair_deep "${NAS2_MOUNT}/${src_sub}" "${NAS1_MOUNT}/${dst_sub}" "${label}"
+        check_pair_deep "$(nas2_target "${src_sub}")" "${NAS1_MOUNT}/${dst_sub}" "${label}"
         ran_any=true
     done
 
@@ -727,18 +908,21 @@ sync_pair() {
     debug "  BW cap : ${bwlimit} KB/s ($( echo "scale=1; ${bwlimit}/1024" | bc ) MB/s)"
     $DRY_RUN && debug "  Mode   : DRY RUN (no changes will be made)"
 
-    # Ensure source exists and is readable
-    if [[ ! -d "${src}" ]]; then
+    # Ensure source exists and is readable (skip the check for a remote
+    # rsync-daemon target — "::" syntax — since there's no local path to stat)
+    if [[ "${src}" != *"::"* && ! -d "${src}" ]]; then
         warn "Source directory does not exist: ${src} — skipping"
         PAIR_RESULTS+=("SKIP  ${label}  (source missing)")
         (( SKIPPED_PAIRS++ )) || true
         return 0
     fi
 
-    # Ensure destination parent exists; create it if necessary.
+    # Ensure destination parent exists; create it if necessary. Skipped for a
+    # remote rsync-daemon target ("::" syntax) — the module root already
+    # exists on NAS2 and rsync creates subpaths under it as needed.
     # mkdir is run even in dry-run mode: it is an idempotent prerequisite,
     # not a sync change, and skipping it causes rsync to fail on new pairs.
-    if [[ ! -d "${dst}" ]]; then
+    if [[ "${dst}" != *"::"* && ! -d "${dst}" ]]; then
         info "Creating destination directory: ${dst}"
         mkdir -p "${dst}" || {
             err "Failed to create destination: ${dst}"
@@ -761,20 +945,19 @@ sync_pair() {
         CURRENT_JOB_START_EPOCH="$(date +%s)"
     fi
 
-    # group_label is a display label; for nas_sync_agent this is the
-    # same as the stable per-pair job_name/group_id, since this is an
-    # ongoing mirror (not a dated set) — there is only ever one backup set
-    # per pair, and it should always group under that one label on the
-    # dashboard.
+    # job_name is one constant value for the whole script run; target_id/
+    # target_label stay the per-pair label so the dashboard shows each pair
+    # as its own sub-target under that single job name.
     jabs_event \
         --event-type "heartbeat" \
         --message "Starting sync: ${label}" \
         --stage "Starting sync" \
         --run-id "${run_id}" \
-        --job-name "${label}" \
+        --job-run-id "${JOB_RUN_ID}" \
+        --job-name "${JOB_NAME}" \
         --backup-type "sync" \
-        --group-id "${label}" \
-        --group-label "${label}" \
+        --target-id "${label}" \
+        --target-label "${label}" \
         --source "${src}" \
         --destination "${dst}" \
         --sync true
@@ -782,8 +965,11 @@ sync_pair() {
     # Assemble the rsync command
     local -a cmd=(rsync)
     cmd+=("${RSYNC_BASE_OPTS[@]}")
+    cmd+=("${RSYNC_COMPRESS_OPTS[@]}")
     cmd+=("--bwlimit=${bwlimit}")
+    cmd+=("--contimeout=10" "--password-file=${NAS2_RSYNC_PASSWORD_FILE}")  # NAS2 is always one side of every pair
     cmd+=(--stats)   # always collected: parsed below to report file/byte counts to JABS
+    jabs_enabled && cmd+=(--info=progress2)
 
     $DRY_RUN && cmd+=(--dry-run)
 
@@ -811,8 +997,9 @@ sync_pair() {
     start_epoch="$(date +%s)"
 
     local exit_code=0
+    local _remaining=0
     if [[ "${DEADLINE_EPOCH}" -gt 0 ]]; then
-        local _remaining=$(( DEADLINE_EPOCH - $(date +%s) ))
+        _remaining=$(( DEADLINE_EPOCH - $(date +%s) ))
         if (( _remaining <= 0 )); then
             info "Deadline reached — skipping ${label} (will resume next run)"
             PAIR_RESULTS+=("STOP  ${label}  (deadline — resumes next run)")
@@ -823,9 +1010,9 @@ sync_pair() {
             # Finalized as "stopped" (not left running) so the dashboard
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
-                --message "Deadline reached before ${label} could start (resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --message "Deadline reached before job could start (resumes next run)" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up 0 --bytes-backed-up 0 \
                 --error-message "Deadline reached before ${label} could start (resumes next run)"
@@ -833,14 +1020,48 @@ sync_pair() {
             return 0
         fi
         debug "Deadline in ${_remaining}s — passing to timeout"
-        timeout --kill-after=5 "${_remaining}" "${cmd[@]}" \
-            > "${stats_file}" \
-            2> >(while IFS= read -r _l; do warn "rsync: ${_l}"; done) || exit_code=$?
-    else
-        "${cmd[@]}" \
-            > "${stats_file}" \
-            2> >(while IFS= read -r _l; do warn "rsync: ${_l}"; done) || exit_code=$?
     fi
+
+    # Set up rsync's stdout/stderr destinations and capture the reader PIDs
+    # so we can wait on exactly those processes below — a bare `wait` would
+    # also block on the whole-script `exec > >(tee ...)` logger started at
+    # startup, which never exits until the script itself does.
+    local out_pid="" err_pid=""
+    if jabs_enabled; then
+        exec 3> >(stdbuf -oL tr '\r' '\n' | tee "${stats_file}" | watch_rsync_progress "${run_id}" "${label}")
+        out_pid=$!
+    else
+        exec 3>"${stats_file}"
+    fi
+    exec 4> >(while IFS= read -r _l; do warn "rsync: ${_l}"; done)
+    err_pid=$!
+
+    local -a run_cmd=("${cmd[@]}")
+    if [[ "${DEADLINE_EPOCH}" -gt 0 ]]; then
+        run_cmd=(timeout --kill-after=5 "${_remaining}" "${cmd[@]}")
+    fi
+
+    # Backgrounded (rather than run synchronously) so a trapped TERM/INT
+    # (manual stop, see _handle_stop_signal) interrupts `wait` immediately
+    # instead of being deferred until rsync exits on its own.
+    "${run_cmd[@]}" >&3 2>&4 &
+    RSYNC_PID=$!
+
+    wait "${RSYNC_PID}" || exit_code=$?
+    # An interrupted `wait` returns early with a synthetic 128+signum status
+    # before rsync has actually exited; keep waiting until it's truly gone so
+    # exit_code reflects rsync's real exit status (20 on signal receipt).
+    while (( exit_code > 128 )) && kill -0 "${RSYNC_PID}" 2>/dev/null; do
+        wait "${RSYNC_PID}" || exit_code=$?
+    done
+    RSYNC_PID=""
+
+    # Close our copies of fd 3/4 so the readers see EOF, then wait only on
+    # those specific reader PIDs so stats_file is fully written before it's
+    # grepped below.
+    exec 3>&- 4>&-
+    [[ -n "${out_pid}" ]] && wait "${out_pid}" 2>/dev/null
+    wait "${err_pid}" 2>/dev/null
 
     # rsync's --stats output is verbose; only the summary line is worth
     # keeping in the log, and it needs our timestamp/level prefix like every
@@ -874,8 +1095,8 @@ sync_pair() {
             PAIR_RESULTS+=("OK    ${label}")
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete" --stage "Completed" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
@@ -884,33 +1105,42 @@ sync_pair() {
             # 23 = partial transfer (some files skipped due to errors)
             # 24 = partial transfer (some source files vanished mid-run)
             warn "PARTIAL: ${label} — some files were skipped (rsync exit ${exit_code})"
-            PAIR_RESULTS+=("WARN  ${label}  (partial, exit ${exit_code})")
+            PAIR_RESULTS+=("WARNING  ${label}  (partial, exit ${exit_code})")
             jabs_event --event-type "backup_complete" --status "success" \
                 --message "Sync complete with warnings (rsync exit ${exit_code}, some files skipped)" \
                 --stage "Completed (partial)" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}"
             ;;
         20)
-            # rsync received SIGTERM/SIGINT/SIGHUP — treated as a deadline stop
-            # (only reaches here if rsync exits with 20 before timeout can return 124)
-            warn "INTERRUPTED: ${label} — rsync received a signal (partial transfer saved; will resume next run)"
-            PAIR_RESULTS+=("STOP  ${label}  (interrupted — resumes next run)")
+            # rsync received SIGTERM/SIGINT/SIGHUP — either a manual stop
+            # (./nas_sync.sh stop) or some other external signal; treated the
+            # same as a deadline stop either way (resumes next run).
+            local stop_msg
+            if ${STOP_REQUESTED}; then
+                stop_msg="${label} stopped manually (partial transfer saved; resumes next run)"
+                warn "STOPPED: ${stop_msg}"
+                PAIR_RESULTS+=("STOP  ${label}  (manual stop — resumes next run)")
+            else
+                stop_msg="${label} interrupted (partial transfer saved; resumes next run)"
+                warn "INTERRUPTED: ${stop_msg}"
+                PAIR_RESULTS+=("STOP  ${label}  (interrupted — resumes next run)")
+            fi
             (( SKIPPED_PAIRS++ )) || true
             DEADLINE_REACHED=true
             # Finalized as "stopped" (not left running) so the dashboard
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
-                --message "${label} interrupted (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --message "${stop_msg}" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}" \
-                --error-message "${label} interrupted (partial transfer saved; resumes next run)"
+                --error-message "${stop_msg}"
             ;;
         124)
             # timeout sent SIGTERM at the deadline; rsync saved the partial file
@@ -921,13 +1151,13 @@ sync_pair() {
             # Finalized as "stopped" (not left running) so the dashboard
             # doesn't show a stale spinner; resumes fresh on the next run.
             jabs_event --event-type "backup_complete" --status "stopped" --stage "Stopped" \
-                --message "${label} stopped at deadline (partial transfer saved; resumes next run)" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --message "Job stopped at deadline (partial transfer saved; resumes next run)" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --files-backed-up "${files_transferred}" \
                 --bytes-backed-up "${bytes_transferred}" \
-                --error-message "${label} stopped at deadline (partial transfer saved; resumes next run)"
+                --error-message "Job stopped at deadline (partial transfer saved; resumes next run)"
             ;;
         *)
             err "FAILED: ${label} — rsync exit code ${exit_code}"
@@ -935,8 +1165,8 @@ sync_pair() {
             (( FAILED_PAIRS++ )) || true
             jabs_event --event-type "error" --status "failed" \
                 --message "Sync failed: ${label}" --stage "Error" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync" \
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync" \
                 --duration-seconds "${duration}" \
                 --error-code "${exit_code}" \
                 --error-message "rsync exit code ${exit_code}"
@@ -952,8 +1182,8 @@ sync_pair() {
             jabs_event --event-type "heartbeat" --status "success" \
                 --message "Sync completed but quick verify found ${mismatch_count} differing item(s)" \
                 --stage "Verify (quick)" \
-                --run-id "${run_id}" --job-name "${label}" --group-id "${label}" \
-                --group-label "${label}" --backup-type "sync"
+                --run-id "${run_id}" --job-name "${JOB_NAME}" --target-id "${label}" \
+                --target-label "${label}" --backup-type "sync"
         fi
     fi
 
@@ -1018,10 +1248,16 @@ main() {
     check_dependencies
 
     # ── JABS — bare heartbeat ────────────────────────────────────────────────
-    # No event_type/group_id → server just records host online + version,
+    # No event_type/target_id → server just records host online + version,
     # without touching any backup job. Sent once per run regardless of
-    # whether any pairs end up running.
-    jabs_event --message "nas_sync run started"
+    # whether any pairs end up running. JOB_CRON (if set) reports this
+    # script's crontab schedule for the dashboard's "Next Event" column.
+    jabs_event --message "nas_sync run started" --job-name "${JOB_NAME}" --cron-schedule "${JOB_CRON}"
+
+    # One ID shared by every pair in this invocation, distinct from each
+    # pair's own run_id — lets the dashboard group all pairs into a single
+    # "job run" and use its earliest start, not any one pair's.
+    JOB_RUN_ID="$(generate_uuid)"
 
     # ── Acquire exclusive lock ─────────────────────────────────────────────
     # flock releases automatically when file descriptor 200 is closed (exit).
@@ -1031,39 +1267,40 @@ main() {
     fi
     debug "Lock acquired: ${LOCK_FILE}"
 
-    # ── Mount verification ─────────────────────────────────────────────────
-    check_nfs_mount "${NAS1_MOUNT}" "NAS1"
-    check_nfs_mount "${NAS2_MOUNT}" "NAS2"
+    # PID file for `./nas_sync.sh stop` (or a plain `kill`) to target.
+    # Written after the lock so it always reflects the one instance that
+    # actually won the lock; removed on normal completion below.
+    echo $$ > "${PID_FILE}"
 
-    # Total expected pairs — used for progress messages
-    local total_expected=$(( ${#NAS1_TO_NAS2_PAIRS[@]} + ${#NAS2_TO_NAS1_PAIRS[@]} ))
+    # ── Connectivity verification ───────────────────────────────────────────
+    check_nfs_mount "${NAS1_MOUNT}" "NAS1"
+    check_rsync_daemon
 
     # ── Process NAS1 → NAS2 pairs ─────────────────────────────────────────
     if [[ ${#NAS1_TO_NAS2_PAIRS[@]} -gt 0 ]]; then
         info ""
         info "━━━ NAS1 → NAS2 (${#NAS1_TO_NAS2_PAIRS[@]} pair(s)) ━━━━━━━━━━━━━━━━━━━━━━━━"
 
-        # Free space check on destination (NAS2)
-        local nas2_space_ok=true
-        check_free_space "${NAS2_MOUNT}" "NAS2 (destination)" || nas2_space_ok=false
-
+        # No free-space pre-check here: NAS2 is a remote rsync-daemon target
+        # (not a local mount), so df isn't available for it.
         for pair in "${NAS1_TO_NAS2_PAIRS[@]}"; do
             local src_sub="${pair%%:*}"
             local dst_sub="${pair##*:}"
             local src="${NAS1_MOUNT}/${src_sub}"
-            local dst="${NAS2_MOUNT}/${dst_sub}"
+            local dst
+            dst="$(nas2_target "${dst_sub}")"
             local label="NAS1:${src_sub} → NAS2:${dst_sub}"
             (( TOTAL_PAIRS++ )) || true
 
-            if ! $nas2_space_ok; then
-                warn "Skipping ${label} — NAS2 low on space"
-                PAIR_RESULTS+=("SKIP  ${label}  (dest low space)")
-                (( SKIPPED_PAIRS++ )) || true
-                continue
-            fi
-
             sync_pair "${src}" "${dst}" "${label}" "${BWLIMIT_NAS1_TO_NAS2}" || true
-            $DEADLINE_REACHED && { info "Deadline reached — stopping NAS1→NAS2 loop"; break; }
+            if $DEADLINE_REACHED || $STOP_REQUESTED; then
+                if $STOP_REQUESTED; then
+                    info "Stop requested — stopping NAS1→NAS2 loop"
+                else
+                    info "Deadline reached — stopping NAS1→NAS2 loop"
+                fi
+                break
+            fi
         done
     fi
 
@@ -1078,7 +1315,8 @@ main() {
         for pair in "${NAS2_TO_NAS1_PAIRS[@]}"; do
             local src_sub="${pair%%:*}"
             local dst_sub="${pair##*:}"
-            local src="${NAS2_MOUNT}/${src_sub}"
+            local src
+            src="$(nas2_target "${src_sub}")"
             local dst="${NAS1_MOUNT}/${dst_sub}"
             local label="NAS2:${src_sub} → NAS1:${dst_sub}"
             (( TOTAL_PAIRS++ )) || true
@@ -1091,7 +1329,14 @@ main() {
             fi
 
             sync_pair "${src}" "${dst}" "${label}" "${BWLIMIT_NAS2_TO_NAS1}" || true
-            $DEADLINE_REACHED && { info "Deadline reached — stopping NAS2→NAS1 loop"; break; }
+            if $DEADLINE_REACHED || $STOP_REQUESTED; then
+                if $STOP_REQUESTED; then
+                    info "Stop requested — stopping NAS2→NAS1 loop"
+                else
+                    info "Deadline reached — stopping NAS2→NAS1 loop"
+                fi
+                break
+            fi
         done
     fi
 
@@ -1103,8 +1348,17 @@ main() {
 
     info ""
     info "════════════════════════════════════════════════════════"
-    $DEADLINE_REACHED && info "Run stopped at deadline (STOP_HOUR=${STOP_HOUR:-unset})" \
-                      || info "Run complete"
+    local run_stopped_early=false
+    { $DEADLINE_REACHED || $STOP_REQUESTED; } && run_stopped_early=true
+    if $run_stopped_early; then
+        if $STOP_REQUESTED; then
+            info "Run stopped manually"
+        else
+            info "Run stopped at deadline (STOP_HOUR=${STOP_HOUR:-unset})"
+        fi
+    else
+        info "Run complete"
+    fi
     info "  Duration    : ${elapsed_fmt}"
     info "  Total pairs : ${TOTAL_PAIRS}"
     info "  Failed      : ${FAILED_PAIRS}"
@@ -1122,13 +1376,20 @@ main() {
     local final_status="OK"
     [[ ${FAILED_PAIRS} -gt 0 ]] && final_status="FAILED (${FAILED_PAIRS} pair(s))"
     [[ ${SKIPPED_PAIRS} -gt 0 && ${FAILED_PAIRS} -eq 0 ]] && final_status="OK (${SKIPPED_PAIRS} skipped)"
-    $DEADLINE_REACHED && final_status="STOPPED AT DEADLINE — ${final_status}"
+    if $run_stopped_early; then
+        if $STOP_REQUESTED; then
+            final_status="STOPPED MANUALLY — ${final_status}"
+        else
+            final_status="STOPPED AT DEADLINE — ${final_status}"
+        fi
+    fi
     $DRY_RUN && final_status="DRY RUN — ${final_status}"
 
     local uk_status="up"
     [[ ${FAILED_PAIRS} -gt 0 ]] && uk_status="down"
     uptime_kuma_ping "${uk_status}" "${final_status} | pairs: ${TOTAL_PAIRS}, failed: ${FAILED_PAIRS}, skipped: ${SKIPPED_PAIRS}"
 
+    rm -f "${PID_FILE}"
     _COMPLETED=true   # disarm the EXIT trap
 
     # Exit non-zero if any pair failed so cron/monitoring can catch it

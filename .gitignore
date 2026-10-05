@@ -2,8 +2,12 @@
 # JABS API key. Never committed; nas_sync.conf.example is the committed template.
 nas_sync.conf
 
+# NAS2 rsync daemon module password (referenced by NAS2_RSYNC_PASSWORD_FILE)
+nas2.rsync.secret
+
 # Runtime state
 nas_sync.lock
+nas_sync.pid
 logs/*
 !logs/.gitkeep
 
