@@ -75,7 +75,7 @@ IFS=$'\n\t'
 
 # Reported to the JABS dashboard as this agent's version; bump when you
 # change this script.
-readonly SCRIPT_VERSION="0.3.0"
+readonly SCRIPT_VERSION="0.3.1"
 
 # Resolve the directory this script lives in (works regardless of cwd)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -187,6 +187,16 @@ cmd_stop() {
 
 cmd_reset() {
     print_section "NAS Sync Agent Reset"
+
+    print_warning "This will clear local logs and the lock file."
+    read -r -p "Are you sure you want to reset the NAS Sync Agent? [y/N] " confirm
+    case "$confirm" in
+        [yY]|[yY][eE][sS]) ;;
+        *)
+            print_status "Reset cancelled."
+            return 1
+            ;;
+    esac
 
     print_status "Clearing logs..."
     local log_dir="${SCRIPT_DIR}/logs"
